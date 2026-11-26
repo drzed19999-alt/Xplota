@@ -15,6 +15,9 @@ from typing import Any
 
 SCANNERS_DIR = Path(__file__).resolve().parent / "scanners"
 
+# ANSI escape sequence pattern for stripping color codes from output
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 @dataclass
 class ScannerInfo:
@@ -84,11 +87,12 @@ def _detect_cli_options(entry: Path) -> dict[str, bool]:
         "timeout": "--timeout" in src,
         "output": bool(re.search(r'["\']--?o(utput)?["\']', src)),
         "all_results": "--all-results" in src,
-        "insecure": "--insecure" in src,
+        "insecure": "--insecure" in src or "-k" in src,
         "follow_redirects": "--follow-redirects" in src,
         "sapi": "--sapi" in src,
         "path": "--path" in src,
         "no_color": "--no-color" in src,
+        "verbose": bool(re.search(r'["\']--?v(erbose)?["\']', src)),
     }
 
 
@@ -165,7 +169,7 @@ def _build_args(
     paths: list[str],
 ) -> list[str]:
     opts = scanner.options
-    args = [sys.executable, str(scanner.entry)]
+    args = [sys.executable, "-u", str(scanner.entry)]
 
     if len(targets) == 1 and opts.get("url"):
         args.extend(["-u", targets[0]])
@@ -183,10 +187,10 @@ def _build_args(
     if opts.get("all_results"):
         args.append("--all-results")
     if insecure and opts.get("insecure"):
-        args.append("--insecure")
+        args.extend(["-k"])
     if follow_redirects and opts.get("follow_redirects"):
         args.append("--follow-redirects")
-    if sapi and opts.get("sapi"):
+    if sapi and sapi != "auto" and opts.get("sapi"):
         args.extend(["--sapi", sapi])
     if opts.get("path"):
         for p in paths:
@@ -194,6 +198,8 @@ def _build_args(
                 args.extend(["--path", p.strip()])
     if opts.get("no_color"):
         args.append("--no-color")
+    if opts.get("verbose"):
+        args.append("-v")
     return args
 
 
@@ -209,11 +215,12 @@ async def run_scanner(
 ):
     """
     Async generator that runs a scanner subprocess and yields event dicts:
+      {"type": "started", "scanner": "...", "targets": int, "pid": int}
       {"type": "log", "line": "..."}
-      {"type": "result", "target": "...", "vulnerable": bool|None, "reason": "...", "error": ...}
+      {"type": "result", ...}
       {"type": "done", "exit_code": int, "count": int}
     """
-    cleaned_targets = [t.strip() for t in targets if t.strip()]
+    cleaned_targets = list(dict.fromkeys(t.strip() for t in targets if t.strip()))
     if not cleaned_targets:
         yield {"type": "error", "message": "No valid targets provided."}
         return
@@ -224,60 +231,96 @@ async def run_scanner(
         output_file = tmp / "results.json"
         hosts_file.write_text("\n".join(cleaned_targets) + "\n", encoding="utf-8")
 
+        threads = max(1, min(int(threads), 100))
+        timeout = max(1, min(int(timeout), 300))
+
         cmd = _build_args(
             scanner=scanner,
             hosts_file=hosts_file,
             output_file=output_file,
             targets=cleaned_targets,
-            threads=max(1, min(int(threads), 100)),
-            timeout=max(1, min(int(timeout), 300)),
+            threads=threads,
+            timeout=timeout,
             insecure=insecure,
             follow_redirects=follow_redirects,
             sapi=sapi,
             paths=paths or [],
         )
 
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(scanner.entry.parent),
+            env=env,
         )
+
+        yield {
+            "type": "started",
+            "scanner": scanner.name,
+            "targets": len(cleaned_targets),
+            "pid": proc.pid,
+        }
 
         try:
             assert proc.stdout is not None
             while True:
-                raw = await proc.stdout.readline()
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout + 30)
+                except asyncio.TimeoutError:
+                    yield {"type": "log", "line": "[xplota] Scanner output stalled, waiting..."}
+                    continue
                 if not raw:
                     break
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if line:
                     yield {"type": "log", "line": line}
 
-            exit_code = await proc.wait()
+            exit_code = await asyncio.wait_for(proc.wait(), timeout=10)
 
             result_count = 0
             if output_file.is_file():
                 try:
-                    data = json.loads(output_file.read_text(encoding="utf-8"))
+                    raw_text = output_file.read_text(encoding="utf-8")
+                    data = json.loads(raw_text)
                     items = data if isinstance(data, list) else data.get("results", [])
                     for item in items:
                         if not isinstance(item, dict):
                             continue
-                        target = item.get("target") or item.get("url") or item.get("host") or ""
+                        target = (
+                            item.get("target")
+                            or item.get("url")
+                            or item.get("host")
+                            or item.get("tested_url")
+                            or ""
+                        )
                         yield {
                             "type": "result",
                             "target": target,
                             "vulnerable": item.get("vulnerable"),
+                            "verdict": item.get("verdict"),
                             "reason": item.get("reason") or "",
                             "error": item.get("error"),
+                            "powered_by": item.get("powered_by"),
+                            "sapi": item.get("sapi"),
                         }
                         result_count += 1
+                except json.JSONDecodeError as exc:
+                    yield {"type": "error", "message": f"Invalid JSON in scanner output: {exc}"}
                 except Exception as exc:
                     yield {"type": "error", "message": f"Failed to parse scanner output: {exc}"}
 
             yield {"type": "done", "exit_code": exit_code, "count": result_count}
+        except asyncio.TimeoutError:
+            yield {"type": "error", "message": "Scanner process timed out during shutdown."}
+            yield {"type": "done", "exit_code": -1, "count": 0}
         finally:
             if proc.returncode is None:
                 proc.kill()
-                await proc.wait()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass

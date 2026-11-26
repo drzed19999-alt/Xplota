@@ -111,7 +111,11 @@ export async function render(container) {
     h3.append(titleSpan, catBadge);
 
     const p = document.createElement("p");
-    p.textContent = sc.description;
+    const maxLen = 160;
+    p.textContent = sc.description.length > maxLen
+      ? sc.description.slice(0, maxLen) + "…"
+      : sc.description;
+    if (sc.description.length > maxLen) p.title = sc.description;
 
     const btn = document.createElement("button");
     btn.textContent = "Select";
@@ -134,8 +138,9 @@ export async function render(container) {
 
   runBtn.onclick = async () => {
     if (!selected) return;
-    const targets = container.querySelector("#targets").value
-      .split(/[\r\n,]+/)
+    const targetsRaw = container.querySelector("#targets").value;
+    const targets = targetsRaw
+      .split(/[\r\n]+/)
       .map((s) => s.trim())
       .filter(Boolean);
 
@@ -162,10 +167,14 @@ export async function render(container) {
     runBtn.disabled = true;
     scanStatus.textContent = "";
     modal.open(() => controller.abort());
-    modal.setStatus(`Running ${selected.name}...`);
+    modal.setStatus(`Running ${selected.name} on ${targets.length} target(s)...`);
 
     let resultCount = 0;
     let vulnCount = 0;
+    let cleanCount = 0;
+    let errorCount = 0;
+    let logLineCount = 0;
+
     try {
       const res = await fetch("/api/scanners/run", {
         method: "POST",
@@ -173,7 +182,14 @@ export async function render(container) {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          detail = errData.detail || detail;
+        } catch {}
+        throw new Error(detail);
+      }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -181,9 +197,32 @@ export async function render(container) {
 
       const handleEvent = (line) => {
         if (!line.trim()) return;
-        const ev = JSON.parse(line);
+        let ev;
+        try {
+          ev = JSON.parse(line);
+        } catch {
+          return;
+        }
+
         if (ev.type === "log") {
-          modal.setStatus(ev.line);
+          logLineCount++;
+          modal.addLog(ev.line);
+          // Parse progress from tqdm-style output or bracket patterns
+          const pctMatch = ev.line.match(/(\d+)%\|/);
+          const bracketMatch = ev.line.match(/(\d+)\/(\d+)/);
+          if (pctMatch) {
+            const pct = parseInt(pctMatch[1]);
+            if (bracketMatch) {
+              modal.setProgress(parseInt(bracketMatch[1]), parseInt(bracketMatch[2]));
+            } else {
+              modal.setProgress(pct, 100);
+            }
+          }
+          // Update the bottom status with the last meaningful log line
+          const stripped = ev.line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+          if (stripped && !stripped.startsWith("=")) {
+            modal.setStatus(stripped);
+          }
         } else if (ev.type === "result") {
           resultCount++;
           let badge;
@@ -191,16 +230,31 @@ export async function render(container) {
             vulnCount++;
             badge = { label: "vulnerable", cls: "taken" };
           } else if (ev.vulnerable === false) {
+            cleanCount++;
             badge = { label: "clean", cls: "free" };
           } else {
-            badge = { label: "error", cls: "soon" };
+            errorCount++;
+            badge = { label: "unknown", cls: "soon" };
           }
-          const detail = ev.reason || ev.error || "";
-          modal.addRow(ev.target, null, detail ? [detail] : [], ev.error, badge);
+          const details = [];
+          if (ev.reason) details.push(ev.reason);
+          if (ev.error) details.push(ev.error);
+          if (ev.verdict) details.push(`verdict: ${ev.verdict}`);
+          if (ev.powered_by) details.push(ev.powered_by);
+          modal.addRow(ev.target, null, details, ev.error, badge);
+          modal.setStatus(`${resultCount} result(s) — ${vulnCount} vuln / ${cleanCount} clean / ${errorCount} unknown`);
         } else if (ev.type === "error") {
-          modal.addRow(selected.name, null, [ev.message], ev.message, { label: "error", cls: "taken" });
+          errorCount++;
+          modal.addRow(ev.message || "Error", null, [ev.message], ev.message, { label: "error", cls: "taken" });
         } else if (ev.type === "done") {
-          modal.finish(`Done (exit ${ev.exit_code}) — ${resultCount} target(s), ${vulnCount} vulnerable.`);
+          const summary = [
+            `Scan complete (exit ${ev.exit_code})`,
+            `${resultCount} target(s) scanned`,
+            vulnCount > 0 ? `${vulnCount} VULNERABLE` : null,
+            cleanCount > 0 ? `${cleanCount} clean` : null,
+            errorCount > 0 ? `${errorCount} error/unknown` : null,
+          ].filter(Boolean).join(" · ");
+          modal.finish(summary);
         }
       };
 
@@ -214,9 +268,14 @@ export async function render(container) {
       }
       buf += decoder.decode();
       if (buf.trim()) handleEvent(buf);
+
+      // If we never got a "done" event, generate a finish summary
+      if (resultCount === 0 && logLineCount > 0) {
+        modal.finish(`Scan complete — ${logLineCount} log line(s), no structured results (check log).`);
+      }
     } catch (e) {
       if (e.name !== "AbortError") {
-        modal.setStatus("Error: " + e.message);
+        modal.finish("Error: " + e.message);
       }
     } finally {
       runBtn.disabled = false;

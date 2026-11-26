@@ -89,6 +89,7 @@ export function render(container) {
         });
         modal.finish(`${found} idea(s) generated.`);
       } else {
+        modal.setStatus(`Scanning domains with DNS${body.php ? " + PHP fingerprint" : ""}...`);
         const res = await fetch("/api/scan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -120,7 +121,7 @@ export function render(container) {
       }
     } catch (e) {
       if (e.name !== "AbortError") {
-        modal.setStatus("Error: " + e.message);
+        modal.finish("Error: " + e.message);
       }
     } finally {
       runBtn.disabled = false;
