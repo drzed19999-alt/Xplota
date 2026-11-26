@@ -161,3 +161,86 @@ async def api_run_scanner(req: ScannerRunRequest):
                 await asyncio.sleep(0)
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ---- Pipeline ---------------------------------------------------------
+
+class PipelineStartRequest(BaseModel):
+    keywords: list[str] = Field(min_length=1, max_length=20)
+    tlds: list[str] = Field(default_factory=lambda: list(DEFAULT_TLDS), max_length=30)
+    max_length: int = Field(default=15, ge=3, le=63)
+    hyphens: bool = False
+    batch_size: int = Field(default=50, ge=10, le=500)
+    concurrency: int = Field(default=50, ge=1, le=200)
+    continuous: bool = True
+    scanner_threads: int = Field(default=5, ge=1, le=50)
+    scanner_timeout: int = Field(default=60, ge=1, le=300)
+    insecure: bool = False
+    follow_redirects: bool = True
+    sapi: str = Field(default="auto", pattern="^(auto|mod_php|fpm)$")
+    scan_paths: list[str] = Field(default_factory=list, max_length=50)
+    scan_headers: list[str] = Field(default_factory=list, max_length=20)
+    wordlist: list[str] = Field(default_factory=list, max_length=5000)
+
+
+@app.post("/api/pipeline/start")
+async def api_pipeline_start(req: PipelineStartRequest):
+    keywords = [k for k in (clean(k) for k in req.keywords) if k]
+    if not keywords:
+        raise HTTPException(status_code=400, detail="No valid keywords provided")
+    ok = await pipeline.start(
+        keywords=keywords,
+        tlds=req.tlds,
+        max_length=req.max_length,
+        hyphens=req.hyphens,
+        batch_size=req.batch_size,
+        concurrency=req.concurrency,
+        continuous=req.continuous,
+        scanner_threads=req.scanner_threads,
+        scanner_timeout=req.scanner_timeout,
+        insecure=req.insecure,
+        follow_redirects=req.follow_redirects,
+        sapi=req.sapi,
+        scan_paths=req.scan_paths,
+        scan_headers=req.scan_headers,
+        wordlist=req.wordlist,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail="Pipeline is already running")
+    return {"status": "started"}
+
+
+@app.post("/api/pipeline/stop")
+async def api_pipeline_stop():
+    await pipeline.stop()
+    return {"status": "stopped"}
+
+
+@app.get("/api/pipeline/status")
+async def api_pipeline_status():
+    return pipeline.snapshot()
+
+
+@app.get("/api/pipeline/stream")
+async def api_pipeline_stream():
+    q = pipeline.subscribe()
+
+    async def stream():
+        try:
+            # Send current snapshot first so reconnecting clients catch up
+            snap = pipeline.snapshot()
+            snap["type"] = "snapshot"
+            yield json.dumps(snap) + "\n"
+
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=30)
+                    yield json.dumps(ev) + "\n"
+                    if ev.get("type") in ("stopped", "complete", "error"):
+                        break
+                except asyncio.TimeoutError:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+        finally:
+            pipeline.unsubscribe(q)
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
