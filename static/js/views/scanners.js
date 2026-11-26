@@ -1,6 +1,8 @@
 export const meta = { id: "scanners", label: "Scanners" };
 
-export async function render(container) {
+export async function render(container, state = null) {
+  const prefillTargets = state?.targets?.length ? state.targets.join("\n") : "";
+
   container.innerHTML = `
     <div class="view-header">
       <h1>Scanners</h1>
@@ -18,9 +20,15 @@ export async function render(container) {
       <h2 id="selectedTitle">Run Scanner</h2>
       <div class="field-row" style="margin-top:8px;">
         <div>
-          <label style="display:block; font-size:12px; color:var(--ink-dim); margin-bottom:6px;">
-            Targets (one URL or host per line)
-          </label>
+          <div class="target-label-row">
+            <label style="font-size:12px; color:var(--ink-dim);">
+              Targets (one URL or host per line)
+            </label>
+            <label class="file-upload-btn">
+              Load hosts file
+              <input type="file" id="hostsFileInput" accept=".txt,.list,.csv" style="display:none">
+            </label>
+          </div>
           <textarea class="dt-textarea" id="targets" placeholder="https://example.com&#10;http://testphp.vulnweb.com"></textarea>
         </div>
       </div>
@@ -29,26 +37,107 @@ export async function render(container) {
         <dt-input id="customPath" label="Custom path(s), space or comma separated (optional)" placeholder="/index.php /admin.php"></dt-input>
       </div>
 
+      <div class="field-row" id="headersRow" style="margin-top:14px; display:none;">
+        <div>
+          <label style="display:block; font-size:12px; color:var(--ink-dim); margin-bottom:6px;">
+            Custom Headers (one per line, e.g. Authorization: Bearer token)
+          </label>
+          <textarea class="dt-textarea" id="customHeaders" style="min-height:60px;" placeholder="Authorization: Bearer ...&#10;Cookie: session=..."></textarea>
+        </div>
+      </div>
+
       <div class="opts-row" id="optsRow"></div>
+      <div class="opts-row" id="extraOptsRow" style="display:none;"></div>
 
       <div class="actions">
         <button class="primary" id="runScanner">Run Scanner</button>
         <span class="hint" id="scanStatus"></span>
       </div>
     </div>
+
+    <div class="panel" id="historyPanel" style="margin-top:16px; display:none;">
+      <h2>Recent Scans</h2>
+      <div class="history-list" id="historyList"></div>
+    </div>
   `;
 
   const grid = container.querySelector("#toolGrid");
   const runnerPanel = container.querySelector("#runnerPanel");
   const selectedTitle = container.querySelector("#selectedTitle");
+  const targetsEl = container.querySelector("#targets");
+  const hostsFileInput = container.querySelector("#hostsFileInput");
   const pathRow = container.querySelector("#pathRow");
+  const headersRow = container.querySelector("#headersRow");
   const optsRow = container.querySelector("#optsRow");
+  const extraOptsRow = container.querySelector("#extraOptsRow");
   const runBtn = container.querySelector("#runScanner");
   const scanStatus = container.querySelector("#scanStatus");
+  const historyPanel = container.querySelector("#historyPanel");
+  const historyList = container.querySelector("#historyList");
   const modal = document.getElementById("resultsModal");
+
+  if (prefillTargets) {
+    targetsEl.value = prefillTargets;
+  }
+
+  hostsFileInput.onchange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      targetsEl.value = String(reader.result || "").trim();
+    };
+    reader.readAsText(file);
+  };
 
   let scanners = [];
   let selected = null;
+
+  function renderHistoryItem(h) {
+    const item = document.createElement("div");
+    item.className = "history-item";
+    const left = document.createElement("div");
+    left.innerHTML = `<strong>${h.scanner_name}</strong> <span class="history-meta">(${h.targets} target(s) · ${new Date(h.timestamp).toLocaleString()})</span>`;
+    const right = document.createElement("div");
+    right.style.display = "flex";
+    right.style.gap = "6px";
+    if (h.vulnerable > 0) right.innerHTML += `<span class="badge taken">${h.vulnerable} vuln</span>`;
+    if (h.clean > 0) right.innerHTML += `<span class="badge free">${h.clean} clean</span>`;
+    if (h.unknown > 0) right.innerHTML += `<span class="badge soon">${h.unknown} unknown</span>`;
+    item.append(left, right);
+    item.onclick = () => {
+      modal.open();
+      (h.results || []).forEach((r) => {
+        const badge = r.vulnerable === true
+          ? { label: "vulnerable", cls: "taken" }
+          : r.vulnerable === false
+            ? { label: "clean", cls: "free" }
+            : { label: "unknown", cls: "soon" };
+        const details = [r.vuln_type, r.status_code ? `HTTP ${r.status_code}` : null, r.powered_by, r.reason, r.error].filter(Boolean);
+        modal.upsertRow(r.target, null, details.join(" · "), r.error, badge, r.evidence || null);
+      });
+      modal.finish(`Saved scan from ${new Date(h.timestamp).toLocaleString()} — ${h.targets} target(s).`);
+    };
+    return item;
+  }
+
+  async function loadHistory() {
+    try {
+      const res = await fetch("/api/scanners/history");
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = data.history || [];
+      if (!items.length) {
+        historyPanel.style.display = "none";
+        return;
+      }
+      historyPanel.style.display = "block";
+      historyList.innerHTML = "";
+      items.slice(0, 8).forEach((h) => historyList.appendChild(renderHistoryItem(h)));
+    } catch {
+      // Ignore history load errors
+    }
+  }
 
   function selectScanner(sc) {
     selected = sc;
@@ -56,11 +145,12 @@ export async function render(container) {
       card.classList.toggle("selected", card.dataset.id === sc.id);
     });
     runnerPanel.style.display = "block";
-    selectedTitle.textContent = `${sc.name} (${sc.category})`;
+    selectedTitle.textContent = `${sc.name} (${sc.category})${sc.cves ? ` — ${sc.cves}` : ""}`;
     scanStatus.textContent = "";
 
     const opts = sc.options || {};
     pathRow.style.display = opts.path ? "flex" : "none";
+    headersRow.style.display = opts.headers ? "flex" : "none";
 
     const parts = [];
     if (opts.insecure) parts.push(`<dt-toggle id="optInsecure" label="ignore TLS errors (-k)"></dt-toggle>`);
@@ -79,6 +169,18 @@ export async function render(container) {
     if (opts.threads) parts.push(`<label class="numfield">threads <input type="text" id="optThreads" value="10"></label>`);
     if (opts.timeout) parts.push(`<label class="numfield">timeout (s) <input type="text" id="optTimeout" value="60"></label>`);
     optsRow.innerHTML = parts.join("");
+
+    const extras = sc.extra_fields || [];
+    if (extras.length) {
+      extraOptsRow.style.display = "flex";
+      extraOptsRow.innerHTML = extras.map((f) => {
+        if (f.type === "toggle") return `<dt-toggle data-extra="${f.name}" label="${f.label || f.name}"></dt-toggle>`;
+        return `<label class="numfield">${f.label || f.name} <input type="text" data-extra="${f.name}" value="${f.default || ""}"></label>`;
+      }).join("");
+    } else {
+      extraOptsRow.style.display = "none";
+      extraOptsRow.innerHTML = "";
+    }
   }
 
   try {
@@ -130,6 +232,8 @@ export async function render(container) {
     if (idx === 0) selectScanner(sc);
   });
 
+  loadHistory();
+
   const clamp = (val, min, max, fallback) => {
     const n = parseInt(val, 10);
     if (Number.isNaN(n)) return fallback;
@@ -138,8 +242,7 @@ export async function render(container) {
 
   runBtn.onclick = async () => {
     if (!selected) return;
-    const targetsRaw = container.querySelector("#targets").value;
-    const targets = targetsRaw
+    const targets = targetsEl.value
       .split(/[\r\n]+/)
       .map((s) => s.trim())
       .filter(Boolean);
@@ -151,6 +254,8 @@ export async function render(container) {
 
     const pathsRaw = container.querySelector("#customPath")?.value || "";
     const paths = pathsRaw.split(/[\s,]+/).filter(Boolean);
+    const headersRaw = container.querySelector("#customHeaders")?.value || "";
+    const headers = headersRaw.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
 
     const body = {
       scanner_id: selected.id,
@@ -161,6 +266,7 @@ export async function render(container) {
       follow_redirects: Boolean(container.querySelector("#optRedirects")?.checked),
       sapi: container.querySelector("#optSapi")?.value || "auto",
       paths,
+      headers,
     };
 
     const controller = new AbortController();
@@ -174,6 +280,7 @@ export async function render(container) {
     let cleanCount = 0;
     let errorCount = 0;
     let logLineCount = 0;
+    const seenTargets = new Set();
 
     try {
       const res = await fetch("/api/scanners/run", {
@@ -187,13 +294,29 @@ export async function render(container) {
         try {
           const errData = await res.json();
           detail = errData.detail || detail;
-        } catch { }
+        } catch {}
         throw new Error(detail);
       }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+
+      const applyRow = (ev) => {
+        let badge;
+        if (ev.vulnerable === true) badge = { label: "vulnerable", cls: "taken" };
+        else if (ev.vulnerable === false) badge = { label: "clean", cls: "free" };
+        else badge = { label: "unknown", cls: "soon" };
+
+        const details = [];
+        if (ev.vuln_type) details.push(ev.vuln_type);
+        if (ev.status_code) details.push(`HTTP ${ev.status_code}`);
+        if (ev.powered_by) details.push(ev.powered_by);
+        if (ev.reason) details.push(ev.reason);
+        if (ev.error && ev.error !== ev.reason) details.push(ev.error);
+
+        modal.upsertRow(ev.target, null, details.join(" · "), ev.error, badge, ev.evidence || null);
+      };
 
       const handleEvent = (line) => {
         if (!line.trim()) return;
@@ -207,7 +330,6 @@ export async function render(container) {
         if (ev.type === "log") {
           logLineCount++;
           modal.addLog(ev.line);
-          // Parse progress from tqdm-style output or bracket patterns
           const pctMatch = ev.line.match(/(\d+)%\|/);
           const bracketMatch = ev.line.match(/(\d+)\/(\d+)/);
           if (pctMatch) {
@@ -218,34 +340,33 @@ export async function render(container) {
               modal.setProgress(pct, 100);
             }
           }
-          // Update the bottom status with the last meaningful log line
           const stripped = ev.line.replace(/\x1b\[[0-9;]*m/g, "").trim();
           if (stripped && !stripped.startsWith("=")) {
             modal.setStatus(stripped);
           }
-        } else if (ev.type === "result") {
-          resultCount++;
-          let badge;
-          if (ev.vulnerable === true) {
-            vulnCount++;
-            badge = { label: "vulnerable", cls: "taken" };
-          } else if (ev.vulnerable === false) {
-            cleanCount++;
-            badge = { label: "clean", cls: "free" };
-          } else {
-            errorCount++;
-            badge = { label: "unknown", cls: "soon" };
+        } else if (ev.type === "live_result") {
+          if (!seenTargets.has(ev.target)) {
+            seenTargets.add(ev.target);
+            resultCount++;
+            if (ev.vulnerable === true) vulnCount++;
+            else if (ev.vulnerable === false) cleanCount++;
+            else errorCount++;
           }
-          const details = [];
-          if (ev.reason) details.push(ev.reason);
-          if (ev.error) details.push(ev.error);
-          if (ev.verdict) details.push(`verdict: ${ev.verdict}`);
-          if (ev.powered_by) details.push(ev.powered_by);
-          modal.addRow(ev.target, null, details, ev.error, badge);
+          applyRow(ev);
+          modal.setStatus(`${resultCount} result(s) — ${vulnCount} vuln / ${cleanCount} clean / ${errorCount} unknown`);
+        } else if (ev.type === "result") {
+          if (!seenTargets.has(ev.target)) {
+            seenTargets.add(ev.target);
+            resultCount++;
+            if (ev.vulnerable === true) vulnCount++;
+            else if (ev.vulnerable === false) cleanCount++;
+            else errorCount++;
+          }
+          applyRow(ev);
           modal.setStatus(`${resultCount} result(s) — ${vulnCount} vuln / ${cleanCount} clean / ${errorCount} unknown`);
         } else if (ev.type === "error") {
           errorCount++;
-          modal.addRow(ev.message || "Error", null, [ev.message], ev.message, { label: "error", cls: "taken" });
+          modal.upsertRow(ev.message || "Error", null, [ev.message], ev.message, { label: "error", cls: "taken" });
         } else if (ev.type === "done") {
           const summary = [
             `Scan complete (exit ${ev.exit_code})`,
@@ -255,6 +376,7 @@ export async function render(container) {
             errorCount > 0 ? `${errorCount} error/unknown` : null,
           ].filter(Boolean).join(" · ");
           modal.finish(summary);
+          loadHistory();
         }
       };
 
@@ -269,7 +391,6 @@ export async function render(container) {
       buf += decoder.decode();
       if (buf.trim()) handleEvent(buf);
 
-      // If we never got a "done" event, generate a finish summary
       if (resultCount === 0 && logLineCount > 0) {
         modal.finish(`Scan complete — ${logLineCount} log line(s), no structured results (check log).`);
       }

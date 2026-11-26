@@ -23,6 +23,7 @@ from core import (
     discover_scanners,
     generate_names,
     get_scanner,
+    load_scan_history,
     run_scanner,
     scan_domains,
 )
@@ -54,6 +55,7 @@ class ScannerRunRequest(BaseModel):
     follow_redirects: bool = False
     sapi: str = Field(default="auto", pattern="^(auto|mod_php|fpm)$")
     paths: list[str] = Field(default_factory=list, max_length=50)
+    headers: list[str] = Field(default_factory=list, max_length=20)
 
 
 @app.get("/")
@@ -126,6 +128,12 @@ async def api_list_scanners():
     return {"scanners": [s.to_dict() for s in discover_scanners()]}
 
 
+@app.get("/api/scanners/history")
+async def api_scanner_history():
+    """Return recent saved scan runs."""
+    return {"history": load_scan_history()}
+
+
 @app.post("/api/scanners/run")
 async def api_run_scanner(req: ScannerRunRequest):
     """Run a discovered scanner and stream NDJSON log/result events."""
@@ -144,6 +152,7 @@ async def api_run_scanner(req: ScannerRunRequest):
                 follow_redirects=req.follow_redirects,
                 sapi=req.sapi,
                 paths=req.paths,
+                headers=req.headers,
             )
         ) as events:
             async for ev in events:

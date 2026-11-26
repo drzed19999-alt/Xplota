@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.scanner_runner import discover_scanners, get_scanner, run_scanner
+from core.scanner_runner import discover_scanners, get_scanner, load_scan_history, run_scanner
 
 
 class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
@@ -18,6 +18,7 @@ class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
         assert sc is not None
         self.assertEqual(sc.category, "php2shell")
         self.assertEqual(sc.name, "php2shell-scanner")
+        self.assertEqual(sc.cves, "CVE-2026-109618 / CVE-2026-109619")
         self.assertTrue(sc.options["url"])
         self.assertTrue(sc.options["list"])
         self.assertTrue(sc.options["output"])
@@ -70,6 +71,7 @@ class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(res["vulnerable"])
             self.assertEqual(res["reason"], "matched")
             self.assertEqual(res["verdict"], "VULNERABLE")
+            self.assertIn("Crash / Anomaly Signal", res["vuln_type"])
 
             done = next(e for e in events if e["type"] == "done")
             self.assertEqual(done["count"], 1)
@@ -109,6 +111,57 @@ class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
 
             done = next(e for e in events if e["type"] == "done")
             self.assertEqual(done["count"], 2)
+
+    async def test_manifest_live_parsing_evidence_and_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sc_dir = root / "web" / "custom_scan"
+            sc_dir.mkdir(parents=True)
+            (sc_dir / "scanner.json").write_text(
+                json.dumps({
+                    "name": "Custom Manifest Scanner",
+                    "cves": "CVE-2026-99999",
+                    "extra_fields": [{"name": "mode", "label": "mode", "type": "text", "default": "fast"}],
+                }),
+                encoding="utf-8",
+            )
+            (sc_dir / "scanner.py").write_text(
+                'import argparse, json\n'
+                'p = argparse.ArgumentParser()\n'
+                'p.add_argument("-u", "--url")\n'
+                'p.add_argument("-o", "--output")\n'
+                'p.add_argument("-H", "--header", action="append")\n'
+                'args = p.parse_args()\n'
+                'print("[VULNERABLE] https://t.example/index.php - Status: 500")\n'
+                'with open(args.output, "w") as f:\n'
+                '    json.dump({"results": [{"host": "https://t.example/index.php", "vulnerable": True, "status_code": 500, "reason": "HTTP 500 with an empty body", "tested_url": "https://t.example/index.php", "request": "POST /index.php", "response": "HTTP/1.1 500"}]}, f)\n',
+                encoding="utf-8",
+            )
+
+            sc = get_scanner("web/custom_scan", base_dir=root)
+            assert sc is not None
+            self.assertEqual(sc.name, "Custom Manifest Scanner")
+            self.assertEqual(sc.cves, "CVE-2026-99999")
+            self.assertTrue(sc.options["headers"])
+            self.assertEqual(len(sc.extra_fields), 1)
+
+            hist_file = root / "history.json"
+            events = []
+            async with contextlib.aclosing(
+                run_scanner(sc, targets=["https://t.example"], headers=["Authorization: Bearer abc"], history_file=hist_file)
+            ) as stream:
+                async for ev in stream:
+                    events.append(ev)
+
+            self.assertTrue(any(e["type"] == "live_result" and e["vulnerable"] is True for e in events))
+            res = next(e for e in events if e["type"] == "result")
+            self.assertIsNotNone(res["evidence"])
+            self.assertEqual(res["evidence"]["request"], "POST /index.php")
+            self.assertIn("Differential Empty HTTP 500", res["vuln_type"])
+
+            history = load_scan_history(hist_file)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["vulnerable"], 1)
 
 
 if __name__ == "__main__":

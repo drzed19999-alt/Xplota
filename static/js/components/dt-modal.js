@@ -36,9 +36,15 @@ class DtModal extends HTMLElement {
             <input type="text" id="dtModalFilter" placeholder="Filter results...">
           </div>
           <div class="modal-tools-actions">
+            <button id="dtModalSendScanner" class="modal-send-btn" style="display:none" title="Send targets to Scanners">
+              Send to Scanner →
+            </button>
             <button id="dtModalExport" title="Export CSV">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8M4 6l3 3 3-3M2 11h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
               CSV
+            </button>
+            <button id="dtModalExportJson" title="Export JSON">
+              JSON
             </button>
             <button id="dtModalCopyAll" title="Copy all results">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M10 4V2.5A1.5 1.5 0 008.5 1h-6A1.5 1.5 0 001 2.5v6A1.5 1.5 0 002.5 10H4" stroke="currentColor" stroke-width="1.2"/></svg>
@@ -94,7 +100,16 @@ class DtModal extends HTMLElement {
     });
     this._filterInput.oninput = (e) => this._filter(e.target.value);
     this.querySelector("#dtModalExport").onclick = () => this._exportCsv();
+    this.querySelector("#dtModalExportJson").onclick = () => this._exportJson();
     this.querySelector("#dtModalCopyAll").onclick = (e) => this._copyAll(e.currentTarget);
+    this._sendBtn = this.querySelector("#dtModalSendScanner");
+    this._sendBtn.onclick = () => {
+      if (this._onSendScanner) {
+        const targets = this._rows.map((r) => r.domain);
+        this._dialog.close();
+        this._onSendScanner(targets);
+      }
+    };
     this._logToggle.onclick = () => {
       const open = this._logPanel.style.display === "none";
       this._logPanel.style.display = open ? "block" : "none";
@@ -103,17 +118,27 @@ class DtModal extends HTMLElement {
     };
 
     this._rows = [];
+    this._rowMap = new Map();
     this._logs = [];
     this._onClose = null;
+    this._onSendScanner = null;
     this._timer = null;
     this._startTime = null;
     this._statCounts = { vulnerable: 0, clean: 0, error: 0, available: 0, taken: 0, generated: 0 };
   }
 
+  setSendToScanner(cb) {
+    this._onSendScanner = cb;
+    this._sendBtn.style.display = cb ? "inline-flex" : "none";
+  }
+
   open(onClose = null) {
     this._rows = [];
+    this._rowMap = new Map();
     this._logs = [];
     this._onClose = onClose;
+    this._onSendScanner = null;
+    this._sendBtn.style.display = "none";
     this._tbody.innerHTML = "";
     this._filterInput.value = "";
     this._table.style.display = "none";
@@ -187,29 +212,14 @@ class DtModal extends HTMLElement {
     }
   }
 
-  addRow(domain, available, signals, error, badgeOverride = null) {
+  addRow(domain, available, signals, error, badgeOverride = null, evidence = null) {
+    return this.upsertRow(domain, available, signals, error, badgeOverride, evidence);
+  }
+
+  upsertRow(domain, available, signals, error, badgeOverride = null, evidence = null) {
     this._empty.style.display = "none";
     this._table.style.display = "table";
-    const tr = document.createElement("tr");
-    tr.className = "modal-result-row";
-    tr.dataset.domain = domain;
 
-    // Target cell
-    const d = document.createElement("td");
-    const cell = document.createElement("div");
-    cell.className = "domain-cell";
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "domain-name";
-    nameSpan.textContent = domain;
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-btn";
-    copyBtn.textContent = "copy";
-    copyBtn.onclick = () => this._copyText(domain, copyBtn);
-    cell.append(nameSpan, copyBtn);
-    d.appendChild(cell);
-
-    // Status cell
-    const s = document.createElement("td");
     let statusLabel = "";
     const badge = document.createElement("span");
     if (badgeOverride) {
@@ -233,31 +243,120 @@ class DtModal extends HTMLElement {
       badge.className = "badge soon";
       badge.textContent = "generated";
     }
+
+    const sigText = signals && signals.length ? (typeof signals === "string" ? signals : signals.join(", ")) : (error || "");
+
+    const existing = this._rowMap.get(domain);
+    if (existing) {
+      const prevKey = existing.record.status.toLowerCase();
+      if (prevKey in this._statCounts && this._statCounts[prevKey] > 0) {
+        this._statCounts[prevKey]--;
+      }
+      const nextKey = statusLabel.toLowerCase();
+      if (nextKey in this._statCounts) this._statCounts[nextKey]++;
+
+      existing.statusTd.innerHTML = "";
+      existing.statusTd.appendChild(badge);
+      existing.sigTd.textContent = sigText;
+      existing.record.status = statusLabel;
+      existing.record.signals = sigText;
+      existing.record.evidence = evidence;
+      this._attachEvidence(existing.tr, existing.cell, evidence);
+      this._updateStats();
+      return;
+    }
+
+    const tr = document.createElement("tr");
+    tr.className = "modal-result-row";
+    tr.dataset.domain = domain;
+
+    const d = document.createElement("td");
+    const cell = document.createElement("div");
+    cell.className = "domain-cell";
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "domain-name";
+    nameSpan.textContent = domain;
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "copy-btn";
+    copyBtn.textContent = "copy";
+    copyBtn.onclick = () => this._copyText(domain, copyBtn);
+    cell.append(nameSpan, copyBtn);
+    d.appendChild(cell);
+
+    const s = document.createElement("td");
     s.appendChild(badge);
 
-    // Track stats
     const statKey = statusLabel.toLowerCase();
     if (statKey in this._statCounts) {
       this._statCounts[statKey]++;
     }
 
-    // Details cell
     const sig = document.createElement("td");
     sig.className = "sig";
-    const sigText = signals && signals.length ? (typeof signals === "string" ? signals : signals.join(", ")) : (error || "");
     sig.textContent = sigText;
     tr.append(d, s, sig);
     this._tbody.appendChild(tr);
-    this._rows.push({ domain, status: statusLabel, signals: sigText });
+
+    const record = { domain, status: statusLabel, signals: sigText, evidence };
+    this._rows.push(record);
+    this._rowMap.set(domain, { tr, cell, statusTd: s, sigTd: sig, record });
+    this._attachEvidence(tr, cell, evidence);
     this._count.textContent = `${this._rows.length} result(s)`;
     this._updateStats();
 
-    // Auto-scroll to new result
     const body = this.querySelector("#dtModalBody");
     if (body) {
       const isNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
       if (isNearBottom) body.scrollTop = body.scrollHeight;
     }
+  }
+
+  _attachEvidence(tr, cell, evidence) {
+    const oldBtn = cell.querySelector(".evidence-btn");
+    if (oldBtn) oldBtn.remove();
+    if (tr.nextElementSibling && tr.nextElementSibling.classList.contains("evidence-row")) {
+      tr.nextElementSibling.remove();
+    }
+    if (!evidence) return;
+
+    const evBtn = document.createElement("button");
+    evBtn.className = "evidence-btn";
+    evBtn.textContent = "evidence";
+    cell.appendChild(evBtn);
+
+    const evTr = document.createElement("tr");
+    evTr.className = "evidence-row";
+    evTr.style.display = "none";
+    const evTd = document.createElement("td");
+    evTd.colSpan = 3;
+    const box = document.createElement("div");
+    box.className = "evidence-box";
+
+    if (evidence.tested_url) {
+      const meta = document.createElement("div");
+      meta.className = "evidence-meta";
+      meta.textContent = `Tested: ${evidence.tested_url}` + (evidence.final_url && evidence.final_url !== evidence.tested_url ? ` → ${evidence.final_url}` : "");
+      box.appendChild(meta);
+    }
+    if (evidence.request) {
+      const pre = document.createElement("pre");
+      pre.textContent = evidence.request;
+      box.appendChild(pre);
+    }
+    if (evidence.response) {
+      const pre = document.createElement("pre");
+      pre.textContent = evidence.response;
+      box.appendChild(pre);
+    }
+    evTd.appendChild(box);
+    evTr.appendChild(evTd);
+    tr.after(evTr);
+
+    evBtn.onclick = () => {
+      const open = evTr.style.display === "none";
+      evTr.style.display = open ? "table-row" : "none";
+      evBtn.textContent = open ? "hide" : "evidence";
+    };
   }
 
   finish(summary) {
@@ -304,10 +403,30 @@ class DtModal extends HTMLElement {
   _filter(q) {
     q = q.toLowerCase();
     Array.from(this._tbody.children).forEach((tr) => {
+      if (tr.classList.contains("evidence-row")) {
+        tr.style.display = "none";
+        return;
+      }
       const match = tr.dataset.domain.toLowerCase().includes(q) ||
                     tr.textContent.toLowerCase().includes(q);
       tr.style.display = match ? "" : "none";
     });
+  }
+
+  _exportJson() {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      total: this._rows.length,
+      results: this._rows,
+      logs: this._logs,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `results-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   _exportCsv() {

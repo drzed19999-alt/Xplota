@@ -71,6 +71,9 @@ export function render(container) {
     runBtn.disabled = true;
     inlineStatus.textContent = "";
     modal.open(() => controller.abort());
+    modal.setSendToScanner((targets) => {
+      window.dispatchEvent(new CustomEvent("xplota:send-to-scanner", { detail: { targets } }));
+    });
 
     let found = 0;
     try {
