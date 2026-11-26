@@ -1,0 +1,405 @@
+export const meta = { id: "pipeline", label: "Pipeline" };
+
+export async function render(container) {
+  container.innerHTML = `
+    <div class="view-header">
+      <h1>Pipeline</h1>
+      <div class="sub">continuous discovery → PHP fingerprint → vulnerability scan</div>
+    </div>
+
+    <div class="panel" id="pipeConfig">
+      <h2>Configuration</h2>
+      <div class="field-row">
+        <dt-input id="pipeKw" label="Keywords (space-separated)" placeholder="shop store ecommerce wordpress"></dt-input>
+      </div>
+      <div style="margin-top:18px;">
+        <dt-chip-group id="pipeTlds" label="TLDs"
+          options="com,net,org,io,co,dev,app,ai,xyz,biz,info"
+          selected="com,net,org,io,co"></dt-chip-group>
+      </div>
+      <div class="opts-row">
+        <dt-toggle id="pipeContinuous" label="continuous mode" checked></dt-toggle>
+        <dt-toggle id="pipeHyphens" label="hyphens"></dt-toggle>
+        <dt-toggle id="pipeInsecure" label="skip TLS"></dt-toggle>
+        <dt-toggle id="pipeRedirects" label="follow redirects" checked></dt-toggle>
+        <label class="numfield">SAPI
+          <select class="dt-select" id="pipeSapi">
+            <option value="auto" selected>auto</option>
+            <option value="mod_php">mod_php</option>
+            <option value="fpm">fpm</option>
+          </select>
+        </label>
+        <label class="numfield">batch <input type="text" id="pipeBatch" value="50"></label>
+        <label class="numfield">concurrency <input type="text" id="pipeConcurrency" value="50"></label>
+        <label class="numfield">scan timeout <input type="text" id="pipeTimeout" value="60"></label>
+        <label class="numfield">max len <input type="text" id="pipeMaxLen" value="15"></label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="pipeStart">▶ Start Pipeline</button>
+        <button class="primary pipe-stop-btn" id="pipeStop" style="display:none;">■ Stop Pipeline</button>
+        <span class="pipeline-phase" id="pipePhase" style="display:none;">
+          <span class="dot-pulse"></span>
+          <span id="pipePhaseText">starting</span>
+        </span>
+        <span class="hint" id="pipeStatus"></span>
+      </div>
+    </div>
+
+    <div class="pipeline-stats-bar" id="statsBar" style="display:none;">
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value" id="statChecked">0</span>
+        <span class="pipeline-stat-label">checked</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value php" id="statPhp">0</span>
+        <span class="pipeline-stat-label">PHP found</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value" id="statScanned">0</span>
+        <span class="pipeline-stat-label">scanned</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value vuln" id="statVuln">0</span>
+        <span class="pipeline-stat-label">vulnerable</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value clean" id="statClean">0</span>
+        <span class="pipeline-stat-label">clean</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value" id="statElapsed">0:00</span>
+        <span class="pipeline-stat-label">elapsed</span>
+      </div>
+    </div>
+
+    <div class="pipeline-split" id="splitView" style="display:none;">
+      <div class="pipeline-pane">
+        <div class="pipeline-pane-head">
+          <div class="pipeline-pane-title"><span class="pipeline-pane-icon">🔍</span> Discovery</div>
+          <span class="pipeline-pane-count" id="discoveryCount">0</span>
+        </div>
+        <div class="pipeline-feed" id="discoveryFeed">
+          <div class="pipeline-empty"><div class="modal-spinner"></div>Waiting for domains…</div>
+        </div>
+      </div>
+      <div class="pipeline-pane">
+        <div class="pipeline-pane-head">
+          <div class="pipeline-pane-title"><span class="pipeline-pane-icon">🎯</span> Vulnerability Scanner</div>
+          <span class="pipeline-pane-count" id="scannerCount">0</span>
+        </div>
+        <div class="pipeline-feed" id="scannerFeed">
+          <div class="pipeline-empty">PHP sites will be scanned automatically</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  /* ---- DOM refs ---- */
+  const $ = (id) => container.querySelector(`#${id}`);
+  const el = {
+    config: $("pipeConfig"), kw: $("pipeKw"), tlds: $("pipeTlds"),
+    startBtn: $("pipeStart"), stopBtn: $("pipeStop"),
+    phase: $("pipePhase"), phaseText: $("pipePhaseText"),
+    status: $("pipeStatus"),
+    statsBar: $("statsBar"), splitView: $("splitView"),
+    statChecked: $("statChecked"), statPhp: $("statPhp"),
+    statScanned: $("statScanned"), statVuln: $("statVuln"),
+    statClean: $("statClean"), statElapsed: $("statElapsed"),
+    discoveryFeed: $("discoveryFeed"), scannerFeed: $("scannerFeed"),
+    discoveryCount: $("discoveryCount"), scannerCount: $("scannerCount"),
+  };
+
+  let controller = null;
+  let elapsedTimer = null;
+  let startTime = 0;
+  let discRowCount = 0;
+  const scanRows = new Map();
+  const MAX_DISC_ROWS = 150;
+
+  /* ---- helpers ---- */
+  const fmtElapsed = (s) => {
+    const sec = Math.floor(s), m = Math.floor(sec / 60);
+    if (m >= 60) { const h = Math.floor(m / 60); return `${h}:${String(m % 60).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`; }
+    return `${m}:${String(sec % 60).padStart(2, "0")}`;
+  };
+  const domainOf = (url) => { try { return new URL(url).hostname; } catch { return url.replace(/^https?:\/\//, "").split("/")[0]; } };
+  const clamp = (v, lo, hi, fb) => { const n = parseInt(v, 10); return Number.isNaN(n) ? fb : Math.max(lo, Math.min(hi, n)); };
+
+  /* ---- stats ---- */
+  function updateStats(s) {
+    el.statChecked.textContent = (s.domains_checked || 0).toLocaleString();
+    el.statPhp.textContent = (s.php_found || 0).toLocaleString();
+    el.statScanned.textContent = (s.scanned || 0).toLocaleString();
+    el.statVuln.textContent = (s.vulnerable || 0).toLocaleString();
+    el.statClean.textContent = (s.scan_clean || 0).toLocaleString();
+    el.discoveryCount.textContent = (s.domains_checked || 0).toLocaleString();
+    el.scannerCount.textContent = (s.scanned || 0).toLocaleString();
+    if (s.phase && s.running) {
+      el.phaseText.textContent = s.phase;
+      el.phase.style.display = "inline-flex";
+    }
+  }
+
+  function showRunning(stats) {
+    el.statsBar.style.display = "flex";
+    el.splitView.style.display = "flex";
+    el.startBtn.style.display = "none";
+    el.stopBtn.style.display = "inline-flex";
+    el.status.textContent = "";
+    container.querySelectorAll("#pipeConfig input, #pipeConfig select, #pipeConfig dt-toggle, #pipeConfig dt-chip-group, #pipeConfig dt-input")
+      .forEach((x) => { x.style.pointerEvents = "none"; x.style.opacity = "0.5"; });
+    updateStats(stats);
+    startTimer(stats.elapsed || 0);
+  }
+
+  function showStopped() {
+    el.startBtn.style.display = "inline-flex";
+    el.startBtn.disabled = false;
+    el.stopBtn.style.display = "none";
+    el.phase.style.display = "none";
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    container.querySelectorAll("#pipeConfig input, #pipeConfig select, #pipeConfig dt-toggle, #pipeConfig dt-chip-group, #pipeConfig dt-input")
+      .forEach((x) => { x.style.pointerEvents = ""; x.style.opacity = ""; });
+  }
+
+  function startTimer(initialSecs) {
+    startTime = Date.now() - initialSecs * 1000;
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = setInterval(() => {
+      el.statElapsed.textContent = fmtElapsed((Date.now() - startTime) / 1000);
+    }, 1000);
+  }
+
+  /* ---- discovery feed (left pane) ---- */
+  function addDiscRow(ev) {
+    const isPhp = ev.type === "php_found";
+    const row = document.createElement("div");
+    row.className = `pipeline-row${isPhp ? " php-found" : ""}`;
+
+    const dom = document.createElement("span");
+    dom.className = "domain";
+    dom.textContent = ev.domain;
+
+    const sig = document.createElement("span");
+    sig.className = "signal";
+    if (isPhp) sig.textContent = "🐘 " + (ev.php_signals || []).join(", ");
+    else if (ev.available === true) sig.textContent = "available (no DNS)";
+    else if (ev.error) sig.textContent = ev.error;
+    else sig.textContent = "registered · no PHP";
+
+    row.append(dom, sig);
+    if (isPhp) {
+      const b = document.createElement("span");
+      b.className = "pipe-badge php";
+      b.textContent = "PHP";
+      row.appendChild(b);
+    }
+
+    el.discoveryFeed.appendChild(row);
+    discRowCount++;
+
+    // Trim non-PHP rows
+    while (discRowCount > MAX_DISC_ROWS) {
+      const first = el.discoveryFeed.querySelector(".pipeline-row:not(.php-found)");
+      if (first) { first.remove(); discRowCount--; } else break;
+    }
+    el.discoveryFeed.scrollTop = el.discoveryFeed.scrollHeight;
+
+    // Remove empty placeholder
+    const empty = el.discoveryFeed.querySelector(".pipeline-empty");
+    if (empty) empty.remove();
+  }
+
+  /* ---- scanner feed (right pane) ---- */
+  function upsertScanRow(domain, status, detail) {
+    let row = scanRows.get(domain);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "pipeline-row queued";
+
+      const dom = document.createElement("span");
+      dom.className = "domain";
+      dom.textContent = domain;
+
+      const sig = document.createElement("span");
+      sig.className = "signal";
+      sig.textContent = "queued…";
+
+      const b = document.createElement("span");
+      b.className = "pipe-badge queued";
+      b.textContent = "QUEUED";
+
+      row.append(dom, sig, b);
+      if (status === "vulnerable") el.scannerFeed.prepend(row);
+      else el.scannerFeed.appendChild(row);
+      scanRows.set(domain, row);
+
+      const empty = el.scannerFeed.querySelector(".pipeline-empty");
+      if (empty) empty.remove();
+    }
+
+    const signalEl = row.querySelector(".signal");
+    const badge = row.querySelector(".pipe-badge");
+    const cfg = {
+      queued:     { cls: "queued",     sig: detail || "queued…",    badge: "QUEUED",   bcls: "queued" },
+      scanning:   { cls: "scanning",   sig: "scanning…",           badge: "SCAN",     bcls: "scanning" },
+      vulnerable: { cls: "vulnerable", sig: detail || "VULNERABLE", badge: "VULN",     bcls: "vuln" },
+      clean:      { cls: "clean",      sig: detail || "clean",     badge: "CLEAN",    bcls: "clean" },
+      error:      { cls: "error",      sig: detail || "error",     badge: "ERR",      bcls: "error" },
+    }[status] || { cls: "error", sig: detail || "unknown", badge: "?", bcls: "error" };
+
+    row.className = `pipeline-row ${cfg.cls}`;
+    if (signalEl) signalEl.textContent = cfg.sig;
+    if (badge) { badge.textContent = cfg.badge; badge.className = `pipe-badge ${cfg.bcls}`; }
+
+    if (status === "vulnerable" && row.parentElement) row.parentElement.prepend(row);
+  }
+
+  /* ---- stream handler ---- */
+  function handleEv(ev) {
+    if (ev.stats) updateStats(ev.stats);
+
+    switch (ev.type) {
+      case "snapshot":
+        if (ev.running) showRunning(ev);
+        (ev.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals }));
+        (ev.scan_results || []).forEach((r) => {
+          const d = domainOf(r.target || "");
+          const st = r.vulnerable === true ? "vulnerable" : r.vulnerable === false ? "clean" : "error";
+          upsertScanRow(d, st, r.vuln_type || r.reason || "");
+        });
+        break;
+      case "started":    showRunning(ev.stats); break;
+      case "checked":    addDiscRow(ev); break;
+      case "php_found":
+        addDiscRow(ev);
+        upsertScanRow(ev.domain, "queued", (ev.php_signals || []).join(", "));
+        break;
+      case "scan_start":
+        (ev.targets || []).forEach((t) => upsertScanRow(t, "scanning", ""));
+        break;
+      case "live_result":
+      case "result":
+        if (ev._src === "scanner" && ev.target) {
+          const d = domainOf(ev.target);
+          const st = ev.vulnerable === true ? "vulnerable" : ev.vulnerable === false ? "clean" : "error";
+          upsertScanRow(d, st, ev.vuln_type || ev.reason || ev.error || "");
+        }
+        break;
+      case "scan_error":
+        (ev.targets || []).forEach((t) => upsertScanRow(t, "error", ev.error || "scan error"));
+        break;
+      case "discovery_done":
+        el.status.textContent = "Discovery complete — draining scanner queue…";
+        break;
+      case "complete":
+        showStopped();
+        el.status.textContent = "✓ Pipeline complete.";
+        break;
+      case "stopped":
+        showStopped();
+        el.status.textContent = "■ Pipeline stopped.";
+        break;
+      case "error":
+        showStopped();
+        el.status.textContent = "Error: " + (ev.error || "unknown");
+        break;
+    }
+  }
+
+  async function connectStream() {
+    controller = new AbortController();
+    try {
+      const res = await fetch("/api/pipeline/stream", { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try { handleEv(JSON.parse(line)); } catch {}
+        }
+      }
+      buf += decoder.decode();
+      if (buf.trim()) try { handleEv(JSON.parse(buf)); } catch {}
+    } catch (e) {
+      if (e.name !== "AbortError") el.status.textContent = "Stream disconnected.";
+    }
+  }
+
+  /* ---- buttons ---- */
+  el.startBtn.onclick = async () => {
+    const keywords = (el.kw.value || "").split(/\s+/).filter(Boolean);
+    if (!keywords.length) { el.status.textContent = "Enter at least one keyword."; return; }
+    const tlds = el.tlds.value;
+    if (!tlds.length) { el.status.textContent = "Select at least one TLD."; return; }
+
+    const body = {
+      keywords, tlds,
+      max_length: clamp($("pipeMaxLen")?.value, 3, 63, 15),
+      hyphens: Boolean($("pipeHyphens")?.checked),
+      continuous: Boolean($("pipeContinuous")?.checked),
+      batch_size: clamp($("pipeBatch")?.value, 10, 500, 50),
+      concurrency: clamp($("pipeConcurrency")?.value, 1, 200, 50),
+      scanner_timeout: clamp($("pipeTimeout")?.value, 1, 300, 60),
+      insecure: Boolean($("pipeInsecure")?.checked),
+      follow_redirects: Boolean($("pipeRedirects")?.checked),
+      sapi: $("pipeSapi")?.value || "auto",
+    };
+
+    el.status.textContent = "Starting…";
+    el.startBtn.disabled = true;
+    el.discoveryFeed.innerHTML = "";
+    el.scannerFeed.innerHTML = "";
+    discRowCount = 0;
+    scanRows.clear();
+
+    try {
+      const res = await fetch("/api/pipeline/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `HTTP ${res.status}`);
+      }
+      connectStream();
+    } catch (e) {
+      el.status.textContent = "Failed: " + e.message;
+      el.startBtn.disabled = false;
+    }
+  };
+
+  el.stopBtn.onclick = async () => {
+    el.stopBtn.disabled = true;
+    el.status.textContent = "Stopping…";
+    try { await fetch("/api/pipeline/stop", { method: "POST" }); } catch {}
+    if (controller) controller.abort();
+    el.stopBtn.disabled = false;
+  };
+
+  /* ---- init: reconnect if already running ---- */
+  try {
+    const res = await fetch("/api/pipeline/status");
+    if (res.ok) {
+      const data = await res.json();
+      if (data.running) {
+        showRunning(data);
+        (data.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals }));
+        (data.scan_results || []).forEach((r) => {
+          const d = domainOf(r.target || "");
+          const st = r.vulnerable === true ? "vulnerable" : r.vulnerable === false ? "clean" : "error";
+          upsertScanRow(d, st, r.vuln_type || r.reason || "");
+        });
+        connectStream();
+      }
+    }
+  } catch {}
+}

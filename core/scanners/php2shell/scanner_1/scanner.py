@@ -14,6 +14,7 @@ import json
 import re
 import ssl
 import sys
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -60,6 +61,52 @@ DEFAULT_USER_AGENT = (
 
 PROBES = ((1, 4000), (8, 1020), (20, 1020))
 REJECTED_STATUSES = {400, 403, 411, 413, 414, 417, 422, 429, 431}
+
+# PHP crash/error patterns in response body (differential detection)
+PHP_CRASH_PATTERNS = [
+    b"Fatal error:",
+    b"Segmentation fault",
+    b"zend_mm_heap corrupted",
+    b"Out of memory",
+    b"Maximum execution time",
+    b"Stack overflow",
+    b"Bus error",
+    b"core dumped",
+    b"munmap_chunk(): invalid pointer",
+    b"free(): invalid pointer",
+    b"double free or corruption",
+    b"Allowed memory size",
+]
+
+# Connection error substrings indicating a process/worker crash
+CRASH_ERROR_INDICATORS = [
+    "connection reset",
+    "broken pipe",
+    "connection aborted",
+    "remote end closed connection",
+    "server unexpectedly closed",
+    "eof occurred",
+    "incomplete read",
+]
+
+# Timing: probe must be this many times slower than control to flag
+TIMING_ANOMALY_FACTOR = 5.0
+# Minimum control elapsed (seconds) to avoid noise on very fast local responses
+MIN_CONTROL_ELAPSED = 0.1
+# Body size: probe body must shrink below this fraction of control body to flag
+BODY_SHRINK_THRESHOLD = 0.2
+
+# Common PHP paths for --auto-paths mode
+AUTO_PATHS = [
+    "/index.php",
+    "/wp-login.php",
+    "/administrator/index.php",
+    "/phpinfo.php",
+    "/info.php",
+    "/wp-admin/admin-ajax.php",
+    "/api/index.php",
+    "/xmlrpc.php",
+]
 FIXED_VERSIONS = {(8, 2): 35, (8, 3): 36, (8, 4): 27, (8, 5): 12}
 VERSION_PATTERN = re.compile(r"PHP/(\d+)\.(\d+)\.(\d+)")
 HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -89,6 +136,7 @@ class HTTPResult:
     headers: Dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     bytes_sent: int = 0
+    elapsed: float = 0.0
     error: Optional[str] = None
 
     @property
@@ -583,6 +631,7 @@ def send_post(
     headers = request_headers(custom_headers, boundary)
     result = HTTPResult()
     current_url = target_url
+    _t0 = time.monotonic()
     for redirects in range(11 if follow_redirects else 1):
         result.bytes_sent += len(body)
         try:
@@ -636,6 +685,7 @@ def send_post(
                 if name.lower() in SENSITIVE_HEADERS or name.lower() == "host":
                     del headers[name]
         current_url = next_url
+    result.elapsed = time.monotonic() - _t0
     return result
 
 
@@ -652,6 +702,21 @@ def version_verdict(powered_by: str) -> Optional[str]:
             return "VULNERABLE"
         return None
     return "FIXED" if patch >= fixed_patch else "VULNERABLE"
+
+
+def extract_php_version(response: HTTPResult) -> str:
+    """Extract PHP version string from X-Powered-By, Server header, or body."""
+    powered_by = response.powered_by
+    if VERSION_PATTERN.search(powered_by):
+        return powered_by
+    server = header_value(response.headers, "Server")
+    if VERSION_PATTERN.search(server):
+        return server
+    body_text = response.body[:4096].decode("utf-8", errors="replace")
+    match = VERSION_PATTERN.search(body_text)
+    if match:
+        return f"PHP/{match.group(1)}.{match.group(2)}.{match.group(3)}"
+    return ""
 
 
 def crash_signal(
@@ -703,6 +768,47 @@ def crash_signal(
             "HTTP 200 with an empty body although the control request produced "
             "output (worker died mid-request)",
         )
+
+    # Differential PHP crash pattern: probe body contains fatal error patterns
+    # that the control response does not
+    for pattern in PHP_CRASH_PATTERNS:
+        if pattern in probe.body and pattern not in control.body:
+            mode = (
+                "PHP-FPM"
+                if sapi == "fpm"
+                else "mod_php"
+                if sapi == "mod_php"
+                else "mod_php/PHP-FPM"
+            )
+            snippet = pattern.decode("utf-8", errors="replace")
+            return (
+                mode,
+                f"PHP crash pattern detected in probe response: {snippet}",
+            )
+
+    # Body content differential: probe response body drastically smaller than
+    # control response with an error status code
+    if (
+        control.body
+        and probe.body
+        and probe.status_code is not None
+        and probe.status_code >= 400
+        and len(probe.body) < len(control.body) * BODY_SHRINK_THRESHOLD
+    ):
+        mode = (
+            "PHP-FPM"
+            if sapi == "fpm"
+            else "mod_php"
+            if sapi == "mod_php"
+            else "mod_php/PHP-FPM"
+        )
+        return (
+            mode,
+            f"probe response body ({len(probe.body)} bytes) is drastically smaller "
+            f"than control ({len(control.body)} bytes) with HTTP {probe.status_code}, "
+            "suggesting the handler crashed before completing output",
+        )
+
     return None, None
 
 
@@ -870,7 +976,7 @@ def check_url(
             result["reason"] = result["error"]
             return result
 
-    powered_by = control.powered_by
+    powered_by = extract_php_version(control) or control.powered_by
     rejected = False
     rejected_reason = None
 
@@ -898,11 +1004,34 @@ def check_url(
         )
         apply_response(result, probe)
 
-        if probe.powered_by:
+        probe_version = extract_php_version(probe)
+        if probe_version:
+            powered_by = probe_version
+        elif probe.powered_by:
             powered_by = probe.powered_by
         result["powered_by"] = powered_by or None
 
         if probe.error:
+            error_lower = probe.error.lower()
+            is_crash_error = any(
+                indicator in error_lower for indicator in CRASH_ERROR_INDICATORS
+            )
+            if is_crash_error:
+                result["vulnerable"] = True
+                result["verdict"] = "VULNERABLE"
+                result["sapi"] = (
+                    "PHP-FPM"
+                    if sapi == "fpm"
+                    else "mod_php"
+                    if sapi == "mod_php"
+                    else "mod_php/PHP-FPM"
+                )
+                result["reason"] = (
+                    f"probe {index} ({size_mib} MiB, {parts} parts) caused the "
+                    f"server to drop the connection: {probe.error} "
+                    "(control request succeeded, indicating a worker crash)"
+                )
+                return result
             result["verdict"] = "INCONCLUSIVE"
             result["error"] = (
                 f"probe {index} failed before a response was read: {probe.error}"
@@ -926,6 +1055,30 @@ def check_url(
             result["reason"] = (
                 f"probe {index} ({size_mib} MiB, {parts} parts) crashed the "
                 f"request handler: {signal}"
+            )
+            return result
+
+        # Timing anomaly: probe took far longer than control with an error status
+        if (
+            control.elapsed >= MIN_CONTROL_ELAPSED
+            and probe.elapsed > control.elapsed * TIMING_ANOMALY_FACTOR
+            and probe.status_code is not None
+            and probe.status_code >= 500
+        ):
+            result["vulnerable"] = True
+            result["verdict"] = "VULNERABLE"
+            result["sapi"] = (
+                "PHP-FPM"
+                if sapi == "fpm"
+                else "mod_php"
+                if sapi == "mod_php"
+                else "mod_php/PHP-FPM"
+            )
+            result["reason"] = (
+                f"probe {index} ({size_mib} MiB, {parts} parts) took "
+                f"{probe.elapsed:.1f}s vs control {control.elapsed:.1f}s "
+                f"({probe.elapsed / control.elapsed:.0f}x slower) with HTTP "
+                f"{probe.status_code}, indicating resource exhaustion"
             )
             return result
 
@@ -1178,6 +1331,11 @@ Examples:
     parser.add_argument(
         "--path-file", help="File containing paths to test (one per line)"
     )
+    parser.add_argument(
+        "--auto-paths",
+        action="store_true",
+        help="Automatically test common PHP paths (index.php, wp-login.php, etc.)",
+    )
     return parser
 
 
@@ -1207,6 +1365,8 @@ def main() -> None:
         paths = load_lines(args.path_file, "path")
     elif args.paths:
         paths = args.paths
+    elif getattr(args, "auto_paths", False):
+        paths = list(AUTO_PATHS)
     if paths == []:
         raise SystemExit("No paths to scan")
 

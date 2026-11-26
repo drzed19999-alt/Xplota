@@ -111,6 +111,14 @@ def _classify_vulnerability(scanner: ScannerInfo, item: dict[str, Any]) -> str:
             signal = "Differential Empty HTTP 500"
         elif "worker died" in reason or status_code in (502, 503, 504):
             signal = f"PHP-FPM Worker Crash (HTTP {status_code or '200'})"
+        elif "crash pattern" in reason:
+            signal = "PHP Crash Pattern (Differential)"
+        elif "drop the connection" in reason or "connection reset" in error:
+            signal = "Connection Drop (Worker Crash)"
+        elif "slower" in reason and "resource exhaustion" in reason:
+            signal = "Timing-Based Resource Exhaustion"
+        elif "drastically smaller" in reason:
+            signal = "Response Body Differential"
         elif "version" in reason or "unpatched" in reason or item.get("powered_by"):
             signal = "Unpatched PHP Version Banner"
         else:
@@ -153,6 +161,7 @@ def _detect_cli_options(entry: Path) -> dict[str, bool]:
         "no_color": "--no-color" in src,
         "verbose": bool(re.search(r'["\']--?v(erbose)?["\']', src)),
         "headers": bool(re.search(r'["\']--?H["\']|--header', src)),
+        "auto_paths": "--auto-paths" in src,
     }
 
 

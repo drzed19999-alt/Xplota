@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.scanner_runner import discover_scanners, get_scanner, load_scan_history, run_scanner
+from core.scanner_runner import (
+    discover_scanners,
+    get_scanner,
+    load_scan_history,
+    run_scanner,
+    _classify_vulnerability,
+    ScannerInfo,
+)
 
 
 class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
@@ -162,6 +169,68 @@ class TestScannerRunner(unittest.IsolatedAsyncioTestCase):
             history = load_scan_history(hist_file)
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]["vulnerable"], 1)
+
+
+class TestClassifyVulnerability(unittest.TestCase):
+    """Tests for the new detection signal classification."""
+
+    def _scanner(self, name="test", cves=None):
+        return ScannerInfo(
+            id="test/scan",
+            name=name,
+            category="test",
+            description="test",
+            entry=Path("."),
+            cves=cves,
+        )
+
+    def test_crash_pattern_signal(self):
+        sc = self._scanner(cves="CVE-2026-99999")
+        item = {"vulnerable": True, "reason": "PHP crash pattern detected in probe response: Fatal error:"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("PHP Crash Pattern (Differential)", result)
+
+    def test_connection_drop_signal(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "probe caused the server to drop the connection: connection reset"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("Connection Drop (Worker Crash)", result)
+
+    def test_timing_signal(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "probe took 15.0s vs control 1.0s (15x slower) with HTTP 500, indicating resource exhaustion"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("Timing-Based Resource Exhaustion", result)
+
+    def test_body_differential_signal(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "probe response body (100 bytes) is drastically smaller than control (5000 bytes)"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("Response Body Differential", result)
+
+    def test_existing_oom_signal_unchanged(self):
+        sc = self._scanner(cves="CVE-2026-109618")
+        item = {"vulnerable": True, "reason": "memory exhausted in Unknown"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("In-band PHP OOM", result)
+
+    def test_existing_empty_500_unchanged(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "empty body response", "status_code": 500}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("Differential Empty HTTP 500", result)
+
+    def test_existing_fpm_crash_unchanged(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "worker died mid-request", "status_code": 502}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("PHP-FPM Worker Crash (HTTP 502)", result)
+
+    def test_version_banner_still_works(self):
+        sc = self._scanner()
+        item = {"vulnerable": True, "reason": "unpatched release: PHP/8.3.20"}
+        result = _classify_vulnerability(sc, item)
+        self.assertIn("Unpatched PHP Version Banner", result)
 
 
 if __name__ == "__main__":

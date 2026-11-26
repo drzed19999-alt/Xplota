@@ -27,6 +27,7 @@ from core import (
     run_scanner,
     scan_domains,
 )
+from core.pipeline import pipeline
 
 app = FastAPI(title="Domain Tool")
 app.mount("/static", StaticFiles(directory="static"), name="static")

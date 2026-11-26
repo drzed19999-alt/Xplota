@@ -7,8 +7,9 @@ import "./components/dt-modal.js";
 import * as domainGenerator from "./views/domain-generator.js";
 import * as scanners from "./views/scanners.js";
 import * as exploits from "./views/exploits.js";
+import * as pipeline from "./views/pipeline.js";
 
-const views = [domainGenerator, scanners, exploits];
+const views = [domainGenerator, scanners, exploits, pipeline];
 const mainEl = document.getElementById("mainView");
 const navButtons = Array.from(document.querySelectorAll(".nav-item"));
 
