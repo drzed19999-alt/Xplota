@@ -245,7 +245,8 @@ class Pipeline:
     async def _check_batch(self, domains: list[str], concurrency: int,
                            scan_queue: asyncio.Queue) -> None:
         async with contextlib.aclosing(
-            scan_domains(domains, do_check=True, do_php=True, concurrency=concurrency)
+            scan_domains(domains, do_check=True, do_php=True,
+                         concurrency=concurrency, dns_mode="system")
         ) as results:
             async for r in results:
                 if self._stop.is_set():

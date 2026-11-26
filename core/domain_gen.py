@@ -6,6 +6,8 @@ checks. Pure logic only -- no FastAPI / HTTP routing here.
 import asyncio
 import itertools
 import re
+import socket
+import time
 from dataclasses import dataclass, field
 
 PREFIXES = ["get", "try", "use", "my", "go", "the", "hey", "join", "meet", "ez"]
@@ -70,9 +72,40 @@ class DomainResult:
 
 
 DOH_URL = "https://cloudflare-dns.com/dns-query"
+DOH_FALLBACK_URL = "https://dns.google/resolve"
+
+# Cooldown timestamp when primary DoH hits ConnectTimeout/ConnectError
+_doh_cooldown_until: float = 0.0
 
 
-async def resolve(domain: str, timeout: float = 4.0, client=None) -> tuple[bool | None, str | None]:
+async def resolve_system(domain: str, timeout: float = 4.0) -> tuple[bool | None, str | None]:
+    """Resolve via the OS DNS resolver (getaddrinfo).
+    Returns (False, None) if an A/AAAA record exists, (True, None) on NXDOMAIN/no data,
+    or (None, error) on timeout/other failure."""
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.getaddrinfo(domain, None, type=socket.SOCK_STREAM),
+            timeout=timeout,
+        )
+        return False, None
+    except asyncio.TimeoutError:
+        return None, "DNS error: SystemTimeout"
+    except socket.gaierror as e:
+        # EAI_NONAME / EAI_NODATA -> domain does not resolve
+        noname_codes = {
+            getattr(socket, "EAI_NONAME", -2),
+            getattr(socket, "EAI_NODATA", -5),
+        }
+        if e.errno in noname_codes or "not known" in str(e).lower() or "no address" in str(e).lower():
+            return True, None
+        return True, None
+    except Exception as e:
+        return None, f"DNS error: {type(e).__name__}"
+
+
+async def resolve(domain: str, timeout: float = 4.0, client=None,
+                  url: str = DOH_URL) -> tuple[bool | None, str | None]:
     """
     Check DNS existence via DNS-over-HTTPS (NS query).
     Returns (True, None) on NXDOMAIN (likely unregistered),
@@ -85,7 +118,7 @@ async def resolve(domain: str, timeout: float = 4.0, client=None) -> tuple[bool 
         client = httpx.AsyncClient()
     try:
         resp = await client.get(
-            DOH_URL,
+            url,
             params={"name": domain, "type": "NS"},
             headers={"Accept": "application/dns-json"},
             timeout=timeout,
@@ -141,10 +174,19 @@ async def check_php(domain: str, client, timeout: float = 6.0) -> tuple[list[str
 
 
 async def scan_domains(domains, do_check: bool, do_php: bool,
-                        concurrency: int = 100, progress_cb=None):
-    """Yields DomainResult objects as checks complete, for live streaming."""
+                        concurrency: int = 100, progress_cb=None,
+                        dns_mode: str = "auto"):
+    """Yields DomainResult objects as checks complete, for live streaming.
+
+    ``dns_mode``:
+      - ``"system"``: use OS DNS (``getaddrinfo``) — fast, never rate-limited by DoH.
+      - ``"doh"``: DoH only (cloudflare-dns.com).
+      - ``"auto"``: try DoH, and on ConnectTimeout/ConnectError fall back to
+        secondary DoH / system DNS with a 60s cooldown on the timed-out DoH host.
+    """
     import httpx
 
+    global _doh_cooldown_until
     concurrency = max(1, min(int(concurrency), 200))
     sem = asyncio.Semaphore(concurrency)
     total = len(domains)
@@ -152,13 +194,33 @@ async def scan_domains(domains, do_check: bool, do_php: bool,
 
     async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (compatible; domain-tool/1.0)"}) as client:
 
+        async def _resolve_domain(domain: str) -> tuple[bool | None, str | None]:
+            global _doh_cooldown_until
+            if dns_mode == "system":
+                return await resolve_system(domain)
+
+            if dns_mode == "auto" and time.monotonic() < _doh_cooldown_until:
+                return await resolve_system(domain)
+
+            avail, err = await resolve(domain, client=client)
+            if err and dns_mode == "auto" and any(
+                k in err for k in ("ConnectTimeout", "ConnectError", "TimeoutException")
+            ):
+                # Try secondary DoH once, then fall back to system DNS
+                avail2, err2 = await resolve(domain, client=client, url=DOH_FALLBACK_URL)
+                if err2 is None:
+                    return avail2, None
+                _doh_cooldown_until = time.monotonic() + 60.0
+                return await resolve_system(domain)
+            return avail, err
+
         async def worker(domain):
             nonlocal done
             async with sem:
                 result = DomainResult(domain=domain)
                 try:
                     if do_check or do_php:
-                        avail, dns_err = await resolve(domain, client=client)
+                        avail, dns_err = await _resolve_domain(domain)
                         result.available = avail
                         if dns_err:
                             result.error = dns_err
