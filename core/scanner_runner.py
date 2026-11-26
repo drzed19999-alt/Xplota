@@ -207,7 +207,7 @@ async def run_scanner(
     scanner: ScannerInfo,
     targets: list[str],
     threads: int = 10,
-    timeout: int = 30,
+    timeout: int = 60,
     insecure: bool = False,
     follow_redirects: bool = False,
     sapi: str = "auto",

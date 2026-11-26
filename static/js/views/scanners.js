@@ -77,7 +77,7 @@ export async function render(container) {
       `);
     }
     if (opts.threads) parts.push(`<label class="numfield">threads <input type="text" id="optThreads" value="10"></label>`);
-    if (opts.timeout) parts.push(`<label class="numfield">timeout (s) <input type="text" id="optTimeout" value="30"></label>`);
+    if (opts.timeout) parts.push(`<label class="numfield">timeout (s) <input type="text" id="optTimeout" value="60"></label>`);
     optsRow.innerHTML = parts.join("");
   }
 
@@ -156,7 +156,7 @@ export async function render(container) {
       scanner_id: selected.id,
       targets,
       threads: clamp(container.querySelector("#optThreads")?.value, 1, 100, 10),
-      timeout: clamp(container.querySelector("#optTimeout")?.value, 1, 300, 30),
+      timeout: clamp(container.querySelector("#optTimeout")?.value, 1, 300, 60),
       insecure: Boolean(container.querySelector("#optInsecure")?.checked),
       follow_redirects: Boolean(container.querySelector("#optRedirects")?.checked),
       sapi: container.querySelector("#optSapi")?.value || "auto",
@@ -187,7 +187,7 @@ export async function render(container) {
         try {
           const errData = await res.json();
           detail = errData.detail || detail;
-        } catch {}
+        } catch { }
         throw new Error(detail);
       }
 

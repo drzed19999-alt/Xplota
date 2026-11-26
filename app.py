@@ -49,7 +49,7 @@ class ScannerRunRequest(BaseModel):
     scanner_id: str = Field(min_length=1, max_length=200)
     targets: list[str] = Field(min_length=1, max_length=500)
     threads: int = Field(default=10, ge=1, le=100)
-    timeout: int = Field(default=30, ge=1, le=300)
+    timeout: int = Field(default=60, ge=1, le=300)
     insecure: bool = False
     follow_redirects: bool = False
     sapi: str = Field(default="auto", pattern="^(auto|mod_php|fpm)$")
