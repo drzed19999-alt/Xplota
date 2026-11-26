@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Tool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/layout.css">
+<link rel="stylesheet" href="/static/css/components.css">
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">domain<span>.</span>tool</div>
+    <nav>
+      <ul>
+        <li><button class="nav-item active" data-view="domain-generator"><span class="dot"></span>Domain Generator</button></li>
+        <li><button class="nav-item" data-view="scanners"><span class="dot"></span>Scanners</button></li>
+        <li><button class="nav-item" data-view="exploits"><span class="dot"></span>Exploits</button></li>
+      </ul>
+    </nav>
+    <div class="sidebar-foot">local · fastapi</div>
+  </aside>
+
+  <main class="main" id="mainView"></main>
+</div>
+
+<dt-modal id="resultsModal" title="Results"></dt-modal>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

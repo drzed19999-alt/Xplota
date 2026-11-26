@@ -1,0 +1,12 @@
+:root{
+  --bg:#14171c; --panel:#1b1f26; --panel-2:#20242c; --line:#2a2f38;
+  --ink:#e7eaef; --ink-dim:#8b93a1; --ink-faint:#5a616e;
+  --amber:#d9922e; --amber-dim:#5c4726; --amber-bg:rgba(217,146,46,.1);
+  --green:#5fae7a; --green-bg:rgba(95,174,122,.12);
+  --red:#c4696a; --red-bg:rgba(196,105,106,.12);
+  --blue:#6c93c9; --blue-bg:rgba(108,147,201,.12);
+  --mono:"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --sans:"Inter", -apple-system, "Segoe UI", sans-serif;
+  --sidebar-w:220px;
+  color-scheme: dark;
+}

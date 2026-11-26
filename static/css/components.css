@@ -1,0 +1,106 @@
+/* ---- buttons ---- */
+button.primary{
+  font-weight:600; font-size:13.5px; background:var(--amber);
+  color:#1b1300; border:1px solid var(--amber); border-radius:8px;
+  padding:10px 20px; cursor:pointer;
+}
+button.primary:hover{filter:brightness(1.07);}
+button.primary:disabled{opacity:.45; cursor:not-allowed;}
+
+/* ---- field layout helpers ---- */
+.field-row{display:flex; gap:16px; flex-wrap:wrap;}
+.field-row > *{flex:1; min-width:200px;}
+.opts-row{display:flex; gap:28px; flex-wrap:wrap; margin-top:18px; align-items:center;}
+.numfield{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--ink-dim);}
+.numfield input{
+  width:56px; background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+  padding:6px 8px; border-radius:6px; font-family:var(--mono); font-size:12.5px;
+}
+.actions{display:flex; align-items:center; gap:12px; margin-top:20px;}
+
+/* ---- dt-input ---- */
+dt-input{display:block;}
+dt-input label{display:block; font-size:12px; color:var(--ink-dim); margin-bottom:6px;}
+dt-input input{
+  width:100%; background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+  padding:10px 12px; border-radius:7px; font-family:var(--mono); font-size:13.5px; outline:none;
+}
+dt-input input:focus{border-color:var(--amber-dim); box-shadow:0 0 0 3px var(--amber-bg);}
+
+/* ---- dt-chip-group ---- */
+dt-chip-group{display:block;}
+dt-chip-group label{display:block; font-size:12px; color:var(--ink-dim); margin-bottom:8px;}
+.chip-row{display:flex; flex-wrap:wrap; gap:7px;}
+.chip{
+  font-family:var(--mono); font-size:12.5px; padding:5px 12px; border:1px solid var(--line);
+  border-radius:999px; cursor:pointer; color:var(--ink-dim); background:transparent; user-select:none;
+}
+.chip.on{border-color:var(--amber-dim); color:var(--amber); background:var(--amber-bg);}
+
+/* ---- dt-toggle ---- */
+dt-toggle{display:flex; align-items:center; gap:10px; cursor:pointer;}
+.switch{
+  width:34px; height:19px; border-radius:999px; background:var(--panel-2); border:1px solid var(--line);
+  position:relative; flex:none; transition:background .15s;
+}
+.switch::after{
+  content:""; position:absolute; width:13px; height:13px; border-radius:50%; background:var(--ink-faint);
+  top:2px; left:2px; transition:transform .15s, background .15s;
+}
+dt-toggle[checked] .switch{background:var(--amber-bg); border-color:var(--amber-dim);}
+dt-toggle[checked] .switch::after{transform:translateX(15px); background:var(--amber);}
+dt-toggle .t-label{font-size:13px; color:var(--ink-dim);}
+
+/* ---- dt-modal ---- */
+dialog.dt-modal{
+  border:none; border-radius:14px; background:var(--panel); color:var(--ink); padding:0;
+  width:min(760px, 92vw); max-height:84vh; margin:auto;
+}
+dialog.dt-modal::backdrop{background:rgba(8,10,13,.7); backdrop-filter:blur(2px);}
+.modal-head{display:flex; align-items:center; justify-content:space-between; padding:18px 22px; border-bottom:1px solid var(--line);}
+.modal-head h3{font-size:15px; font-weight:600; display:inline;}
+.modal-head .count{font-family:var(--mono); font-size:12px; color:var(--ink-dim); margin-left:10px;}
+.modal-close{background:none; border:none; color:var(--ink-dim); font-size:20px; cursor:pointer; line-height:1; padding:4px;}
+.modal-close:hover{color:var(--ink);}
+.modal-tools{display:flex; gap:10px; align-items:center; padding:14px 22px; border-bottom:1px solid var(--line);}
+.modal-tools input{
+  flex:1; background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+  padding:7px 10px; border-radius:7px; font-family:var(--mono); font-size:12.5px; outline:none;
+}
+.modal-tools button{
+  font-size:12px; font-weight:600; color:var(--ink-dim); background:transparent;
+  border:1px solid var(--line); border-radius:7px; padding:7px 12px; cursor:pointer;
+}
+.modal-tools button:hover{color:var(--ink); border-color:var(--ink-faint);}
+.modal-body{overflow-y:auto; max-height:52vh; padding:6px 0;}
+.modal-empty{padding:40px 22px; text-align:center; color:var(--ink-faint); font-size:13px;}
+.modal-foot{padding:12px 22px; border-top:1px solid var(--line); font-family:var(--mono); font-size:11.5px; color:var(--ink-faint);}
+
+/* ---- results table ---- */
+table{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:13px;}
+thead th{
+  text-align:left; color:var(--ink-faint); font-weight:500; font-size:11px;
+  padding:8px 22px; position:sticky; top:0; background:var(--panel);
+}
+tbody td{padding:9px 22px; border-top:1px solid #222630;}
+tbody tr:hover{background:var(--panel-2);}
+.domain-cell{display:flex; align-items:center; gap:9px;}
+.copy-btn{
+  background:none; border:none; color:var(--ink-faint); cursor:pointer;
+  font-size:11px; padding:2px 6px; border-radius:4px; font-family:var(--sans);
+}
+.copy-btn:hover{color:var(--amber); background:var(--amber-bg);}
+.sig{color:var(--ink-faint); font-size:12px;}
+
+/* ---- placeholder "coming soon" cards (Scanners / Exploits views) ---- */
+.tool-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:14px; margin-top:4px;}
+.tool-card{
+  background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
+  padding:16px 18px; opacity:.75;
+}
+.tool-card h3{font-size:13.5px; font-weight:600; margin-bottom:6px; display:flex; align-items:center; gap:8px;}
+.tool-card p{margin:0 0 12px; font-size:12.5px; color:var(--ink-dim);}
+.tool-card button{
+  font-size:12px; font-weight:600; color:var(--ink-faint); background:transparent;
+  border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:not-allowed;
+}

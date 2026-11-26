@@ -1,0 +1,15 @@
+*{box-sizing:border-box;}
+html,body{height:100%;}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:var(--sans); font-size:14px; line-height:1.5;
+}
+h1,h2,h3{margin:0;}
+button{font-family:inherit;}
+.hint{color:var(--ink-faint); font-size:12px; font-family:var(--mono);}
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px 24px; margin-bottom:18px;}
+.panel h2{font-size:12px; color:var(--ink-dim); margin:0 0 16px; font-weight:500;}
+.badge{font-size:10.5px; padding:2px 9px; border-radius:999px; font-family:var(--sans); font-weight:600; white-space:nowrap;}
+.badge.free{background:var(--green-bg); color:var(--green);}
+.badge.taken{background:var(--red-bg); color:var(--red);}
+.badge.soon{background:var(--blue-bg); color:var(--blue);}
