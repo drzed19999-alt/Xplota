@@ -76,7 +76,7 @@ class DtModal extends HTMLElement {
       // Ignore clipboard permission errors
     }
   }
-  addRow(domain, available, signals, error) {
+  addRow(domain, available, signals, error, badgeOverride = null) {
     this._empty.style.display = "none";
     this._table.style.display = "table";
     const tr = document.createElement("tr");
@@ -95,19 +95,29 @@ class DtModal extends HTMLElement {
 
     const s = document.createElement("td");
     let statusLabel = "";
-    if (error) {
+    const badge = document.createElement("span");
+    if (badgeOverride) {
+      statusLabel = badgeOverride.label;
+      badge.className = `badge ${badgeOverride.cls || "soon"}`;
+      badge.textContent = statusLabel;
+    } else if (error) {
       statusLabel = "error";
-      s.innerHTML = `<span class="badge taken">error</span>`;
+      badge.className = "badge taken";
+      badge.textContent = "error";
     } else if (available === true) {
       statusLabel = "available";
-      s.innerHTML = `<span class="badge free">available</span>`;
+      badge.className = "badge free";
+      badge.textContent = "available";
     } else if (available === false) {
       statusLabel = "taken";
-      s.innerHTML = `<span class="badge taken">taken</span>`;
+      badge.className = "badge taken";
+      badge.textContent = "taken";
     } else {
       statusLabel = "generated";
-      s.innerHTML = `<span class="sig">—</span>`;
+      badge.className = "sig";
+      badge.textContent = "—";
     }
+    s.appendChild(badge);
 
     const sig = document.createElement("td");
     sig.className = "sig";

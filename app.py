@@ -12,12 +12,20 @@ import contextlib
 import json
 import random
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from core import DEFAULT_TLDS, clean, generate_names, scan_domains
+from core import (
+    DEFAULT_TLDS,
+    clean,
+    discover_scanners,
+    generate_names,
+    get_scanner,
+    run_scanner,
+    scan_domains,
+)
 
 app = FastAPI(title="Domain Tool")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -35,6 +43,17 @@ class ScanRequest(GenerateRequest):
     check: bool = True
     php: bool = False
     concurrency: int = Field(default=100, ge=1, le=200)
+
+
+class ScannerRunRequest(BaseModel):
+    scanner_id: str = Field(min_length=1, max_length=200)
+    targets: list[str] = Field(min_length=1, max_length=500)
+    threads: int = Field(default=10, ge=1, le=100)
+    timeout: int = Field(default=30, ge=1, le=300)
+    insecure: bool = False
+    follow_redirects: bool = False
+    sapi: str = Field(default="auto", pattern="^(auto|mod_php|fpm)$")
+    paths: list[str] = Field(default_factory=list, max_length=50)
 
 
 @app.get("/")
@@ -96,6 +115,39 @@ async def api_scan(req: ScanRequest):
                 count += 1
                 if count >= req.count:
                     break
+                await asyncio.sleep(0)
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@app.get("/api/scanners")
+async def api_list_scanners():
+    """Return all discovered scanners under core/scanners/."""
+    return {"scanners": [s.to_dict() for s in discover_scanners()]}
+
+
+@app.post("/api/scanners/run")
+async def api_run_scanner(req: ScannerRunRequest):
+    """Run a discovered scanner and stream NDJSON log/result events."""
+    scanner = get_scanner(req.scanner_id)
+    if scanner is None:
+        raise HTTPException(status_code=404, detail=f"Scanner not found: {req.scanner_id}")
+
+    async def stream():
+        async with contextlib.aclosing(
+            run_scanner(
+                scanner,
+                targets=req.targets,
+                threads=req.threads,
+                timeout=req.timeout,
+                insecure=req.insecure,
+                follow_redirects=req.follow_redirects,
+                sapi=req.sapi,
+                paths=req.paths,
+            )
+        ) as events:
+            async for ev in events:
+                yield json.dumps(ev) + "\n"
                 await asyncio.sleep(0)
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")

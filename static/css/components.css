@@ -92,15 +92,30 @@ tbody tr:hover{background:var(--panel-2);}
 .copy-btn:hover{color:var(--amber); background:var(--amber-bg);}
 .sig{color:var(--ink-faint); font-size:12px;}
 
-/* ---- placeholder "coming soon" cards (Scanners / Exploits views) ---- */
-.tool-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:14px; margin-top:4px;}
+/* ---- scanner / tool cards ---- */
+.tool-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:14px; margin-top:4px;}
 .tool-card{
   background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
-  padding:16px 18px; opacity:.75;
+  padding:16px 18px; opacity:.75; display:flex; flex-direction:column; justify-content:space-between;
 }
-.tool-card h3{font-size:13.5px; font-weight:600; margin-bottom:6px; display:flex; align-items:center; gap:8px;}
-.tool-card p{margin:0 0 12px; font-size:12.5px; color:var(--ink-dim);}
+.tool-card.ready{opacity:1; cursor:pointer; transition:border-color .15s;}
+.tool-card.ready:hover{border-color:var(--ink-faint);}
+.tool-card.selected{border-color:var(--amber-dim); box-shadow:0 0 0 2px var(--amber-bg);}
+.tool-card h3{font-size:13.5px; font-weight:600; margin-bottom:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+.tool-card p{margin:0 0 12px; font-size:12.5px; color:var(--ink-dim); line-height:1.45;}
 .tool-card button{
   font-size:12px; font-weight:600; color:var(--ink-faint); background:transparent;
-  border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:not-allowed;
+  border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:not-allowed; align-self:flex-start;
+}
+.tool-card.ready button{color:var(--ink); cursor:pointer;}
+.tool-card.ready.selected button{border-color:var(--amber-dim); color:var(--amber); background:var(--amber-bg);}
+textarea.dt-textarea{
+  width:100%; min-height:92px; resize:vertical; background:var(--panel-2);
+  border:1px solid var(--line); color:var(--ink); padding:10px 12px;
+  border-radius:7px; font-family:var(--mono); font-size:13px; outline:none;
+}
+textarea.dt-textarea:focus{border-color:var(--amber-dim); box-shadow:0 0 0 3px var(--amber-bg);}
+select.dt-select{
+  background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+  padding:6px 10px; border-radius:6px; font-family:var(--mono); font-size:12.5px;
 }
