@@ -34,6 +34,76 @@ _WORD_SUFFIXES = [
     "one", "360", "24", "7", "x", "z", "app", "hub", "dev",
 ]
 
+MAX_SCAN_RETRIES = 2
+RETRY_COOLDOWN_SECS = 15.0
+
+_RETRYABLE_PATTERNS = (
+    "timeout", "inconclusive", "connection", "transport", "reset",
+    "eof", "tls", "certificate", "502", "503", "504", "429",
+)
+_PERMANENT_PATTERNS = ("nxdomain", "not found", "404")
+
+
+def _is_retryable_error(reason: str) -> bool:
+    low = (reason or "").lower()
+    if any(p in low for p in _PERMANENT_PATTERNS):
+        return False
+    return any(p in low for p in _RETRYABLE_PATTERNS)
+
+
+def _flip_scheme(url: str) -> str:
+    if url.startswith("https://"):
+        return "http://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return f"http://{url}"
+
+
+def _build_retry_params(
+    target: str,
+    reason: str,
+    attempt: int,
+    base_timeout: int,
+    base_threads: int,
+    base_insecure: bool,
+    base_redirects: bool,
+    base_paths: list[str],
+) -> dict[str, Any]:
+    """Compute adjusted scanner parameters for an idle-time retry."""
+    url = target if "://" in target else f"https://{target}"
+    low = (reason or "").lower()
+    timeout = base_timeout
+    threads = 1
+    insecure = base_insecure
+    follow_redirects = base_redirects
+    paths = list(base_paths)
+
+    if "timeout" in low or "inconclusive" in low:
+        mult = 1.5 if attempt == 1 else 2.0
+        timeout = min(120, max(base_timeout, int(base_timeout * mult)))
+        if attempt >= 2 and not paths:
+            paths = ["/"]
+    elif any(k in low for k in ("connection", "transport", "tls", "certificate", "reset", "eof")):
+        if attempt == 1:
+            url = _flip_scheme(url)
+            insecure = True
+        else:
+            follow_redirects = not base_redirects
+            timeout = min(120, max(base_timeout, int(base_timeout * 1.5)))
+            insecure = True
+    else:
+        timeout = min(120, max(base_timeout, int(base_timeout * 1.5)))
+
+    return {
+        "target": url,
+        "attempt": attempt,
+        "timeout": timeout,
+        "threads": threads,
+        "insecure": insecure,
+        "follow_redirects": follow_redirects,
+        "paths": paths,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Domain generator (lazy — yields one domain at a time)
@@ -369,70 +439,186 @@ class Pipeline:
             await self._emit({"type": "scan_error", "error": "php2shell scanner not found"})
             return
 
-        while True:
-            first = await queue.get()
-            if first is None or self._stop.is_set():
-                break
+        retry_items: list[dict[str, Any]] = []
+        discovery_done = False
 
-            # Collect small batch (up to 5) for efficiency
-            batch = [first]
-            for _ in range(4):
-                try:
-                    t = queue.get_nowait()
-                    if t is None:
-                        await queue.put(None)   # re-queue poison pill
-                        break
-                    batch.append(t)
-                except asyncio.QueueEmpty:
-                    break
+        def _upsert_result(ev: dict[str, Any]) -> None:
+            host = canonical_host(ev.get("target") or "")
+            for idx, existing in enumerate(self._results):
+                if canonical_host(existing.get("target") or "") == host:
+                    self._results[idx] = ev
+                    return
+            self._results.append(ev)
 
-            if not batch:
-                continue
-
-            urls = [t if "://" in t else f"https://{t}" for t in batch]
-            await self._emit({
-                "type": "scan_start", "targets": urls,
-                "queue_remaining": queue.qsize(),
-                "stats": self.state.to_dict(),
-            })
+        async def _run_batch(
+            urls: list[str],
+            *,
+            run_threads: int,
+            run_timeout: int,
+            run_insecure: bool,
+            run_redirects: bool,
+            run_paths: list[str],
+            attempt: int,
+            prev_reason: str = "",
+        ) -> None:
+            if attempt == 0:
+                await self._emit({
+                    "type": "scan_start", "targets": urls,
+                    "queue_remaining": queue.qsize(),
+                    "stats": self.state.to_dict(),
+                })
+            else:
+                await self._emit({
+                    "type": "scan_retry", "targets": urls,
+                    "attempt": attempt, "max_retries": MAX_SCAN_RETRIES,
+                    "reason": prev_reason,
+                    "stats": self.state.to_dict(),
+                })
 
             try:
                 async with contextlib.aclosing(
-                    run_scanner(scanner, targets=urls, threads=threads,
-                               timeout=timeout, insecure=insecure,
-                               follow_redirects=follow_redirects, sapi=sapi,
-                               paths=paths, headers=headers)
+                    run_scanner(scanner, targets=urls, threads=run_threads,
+                               timeout=run_timeout, insecure=run_insecure,
+                               follow_redirects=run_redirects, sapi=sapi,
+                               paths=run_paths, headers=headers)
                 ) as events:
                     async for ev in events:
                         if self._stop.is_set():
                             break
                         if ev.get("type") == "result":
-                            self.state.scanned += 1
-                            if ev.get("vulnerable") is True:
-                                self.state.vulnerable += 1
+                            vuln = ev.get("vulnerable")
+                            reason = ev.get("reason") or ev.get("error") or ""
+                            if attempt == 0:
+                                self.state.scanned += 1
+                                if vuln is True:
+                                    self.state.vulnerable += 1
+                                elif vuln is False:
+                                    self.state.scan_clean += 1
+                                else:
+                                    self.state.scan_errors += 1
+                            else:
+                                if vuln is True:
+                                    self.state.scan_errors = max(0, self.state.scan_errors - 1)
+                                    self.state.vulnerable += 1
+                                elif vuln is False:
+                                    self.state.scan_errors = max(0, self.state.scan_errors - 1)
+                                    self.state.scan_clean += 1
+
+                            if vuln is True:
                                 meta = self._target_meta.get(canonical_host(ev.get("target") or ""), {})
                                 ev["saved_vuln"] = save_vulnerable_site({
                                     "target": ev.get("target") or "",
                                     "vuln_type": ev.get("vuln_type") or "php2shell",
-                                    "reason": ev.get("reason") or "",
+                                    "reason": reason,
                                     "php_version": ev.get("php_version") or "",
                                     "source": meta.get("source", ""),
                                     "signals": meta.get("signals", []),
                                 })
-                            elif ev.get("vulnerable") is False:
-                                self.state.scan_clean += 1
-                            else:
-                                self.state.scan_errors += 1
-                            self._results.append(ev)
+                            elif vuln is None and attempt < MAX_SCAN_RETRIES and _is_retryable_error(reason):
+                                retry_items.append({
+                                    "target": ev.get("target") or urls[0],
+                                    "reason": reason,
+                                    "attempt": attempt + 1,
+                                    "ready_at": time.monotonic() + RETRY_COOLDOWN_SECS,
+                                })
+
+                            _upsert_result(ev)
                         ev["_src"] = "scanner"
+                        ev["attempt"] = attempt
                         ev["stats"] = self.state.to_dict()
                         await self._emit(ev)
             except Exception as exc:
-                self.state.scan_errors += 1
+                if attempt == 0:
+                    self.state.scan_errors += 1
                 await self._emit({
                     "type": "scan_error", "targets": urls,
                     "error": str(exc), "stats": self.state.to_dict(),
                 })
+
+        while not self._stop.is_set():
+            # 1) Prioritize fresh targets from scan_queue
+            batch: list[str] = []
+            while len(batch) < 5:
+                try:
+                    t = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if t is None:
+                    discovery_done = True
+                    break
+                batch.append(t)
+
+            if batch:
+                urls = [t if "://" in t else f"https://{t}" for t in batch]
+                await _run_batch(
+                    urls,
+                    run_threads=threads,
+                    run_timeout=timeout,
+                    run_insecure=insecure,
+                    run_redirects=follow_redirects,
+                    run_paths=paths,
+                    attempt=0,
+                )
+                continue
+
+            # 2) Scanner is idle — check retry_items for ready targets
+            now = time.monotonic()
+            ready_idx = next((i for i, it in enumerate(retry_items) if it["ready_at"] <= now), None)
+            if ready_idx is not None:
+                item = retry_items.pop(ready_idx)
+                cfg = _build_retry_params(
+                    item["target"], item["reason"], item["attempt"],
+                    timeout, threads, insecure, follow_redirects, paths,
+                )
+                await _run_batch(
+                    [cfg["target"]],
+                    run_threads=cfg["threads"],
+                    run_timeout=cfg["timeout"],
+                    run_insecure=cfg["insecure"],
+                    run_redirects=cfg["follow_redirects"],
+                    run_paths=cfg["paths"],
+                    attempt=cfg["attempt"],
+                    prev_reason=item["reason"],
+                )
+                continue
+
+            # 3) Nothing ready right now
+            if discovery_done:
+                if not retry_items:
+                    break
+                wait_for = max(0.1, min(1.0, retry_items[0]["ready_at"] - now))
+                await asyncio.sleep(wait_for)
+                continue
+
+            # Wait briefly for a fresh target, then re-check retry_items
+            try:
+                first = await asyncio.wait_for(queue.get(), timeout=1.0)
+                if first is None:
+                    discovery_done = True
+                else:
+                    # Put back or process directly
+                    batch = [first]
+                    while len(batch) < 5:
+                        try:
+                            t = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if t is None:
+                            discovery_done = True
+                            break
+                        batch.append(t)
+                    urls = [t if "://" in t else f"https://{t}" for t in batch]
+                    await _run_batch(
+                        urls,
+                        run_threads=threads,
+                        run_timeout=timeout,
+                        run_insecure=insecure,
+                        run_redirects=follow_redirects,
+                        run_paths=paths,
+                        attempt=0,
+                    )
+            except asyncio.TimeoutError:
+                pass
 
 
 # Global singleton

@@ -312,6 +312,7 @@ export async function render(container) {
     const cfg = {
       queued:     { cls: "queued",     sig: detail || "queued…",    badge: "QUEUED",   bcls: "queued" },
       scanning:   { cls: "scanning",   sig: "scanning…",           badge: "SCAN",     bcls: "scanning" },
+      retrying:   { cls: "retrying",   sig: detail || "retrying…",  badge: "RETRY",    bcls: "retrying" },
       vulnerable: { cls: "vulnerable", sig: detail || "VULNERABLE", badge: "VULN",     bcls: "vuln" },
       clean:      { cls: "clean",      sig: detail || "clean",     badge: "CLEAN",    bcls: "clean" },
       error:      { cls: "error",      sig: detail || "error",     badge: "ERR",      bcls: "error" },
@@ -449,6 +450,11 @@ export async function render(container) {
         break;
       case "scan_start":
         (ev.targets || []).forEach((t) => upsertScanRow(domainOf(t), "scanning", ""));
+        break;
+      case "scan_retry":
+        (ev.targets || []).forEach((t) =>
+          upsertScanRow(domainOf(t), "retrying", `retry ${ev.attempt || 1}/${ev.max_retries || 2}…`)
+        );
         break;
       case "live_result":
       case "result":

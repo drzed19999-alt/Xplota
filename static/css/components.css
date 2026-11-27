@@ -965,6 +965,11 @@ select.dt-select {
   animation: scanPulse 1.2s ease-in-out infinite;
 }
 
+.pipeline-row.retrying {
+  border-left-color: var(--amber);
+  animation: scanPulse 1.2s ease-in-out infinite;
+}
+
 .pipeline-row.vulnerable {
   border-left-color: var(--red);
   background: rgba(196, 105, 106, .08);
@@ -994,6 +999,7 @@ select.dt-select {
 .pipe-badge.php      { background: var(--amber-bg); color: var(--amber); }
 .pipe-badge.queued   { background: var(--blue-bg);  color: var(--blue);  }
 .pipe-badge.scanning { background: var(--blue-bg);  color: var(--blue);  }
+.pipe-badge.retrying { background: var(--amber-bg); color: var(--amber); }
 .pipe-badge.vuln     { background: var(--red-bg);   color: var(--red);   }
 .pipe-badge.clean    { background: var(--green-bg);  color: var(--green); }
 .pipe-badge.error    { background: rgba(255,255,255,.06); color: var(--ink-faint); }
