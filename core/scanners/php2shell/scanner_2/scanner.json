@@ -1,0 +1,72 @@
+{
+  "name": "PHP2Shell RCE Chain (52704)",
+  "category": "php2shell",
+  "description": "Full CVE-2026-109618 / CVE-2026-109619 exploit chain: OOM disclosure + optional 128 MiB libphp RCE sink. Targets Apache/mod_php 8.5.11 with ASLR. Runs 52704.py (xplota_1) against each host. Use on authorised lab targets only.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true,
+    "list": true,
+    "threads": true,
+    "timeout": true,
+    "output": true,
+    "all_results": true,
+    "verbose": true,
+    "no_color": true,
+    "path": true,
+    "headers": false,
+    "insecure": false,
+    "follow_redirects": false,
+    "sapi": false,
+    "auto_paths": false
+  },
+  "extra_fields": [
+    {
+      "name": "rce",
+      "label": "RCE command (empty = disclosure only)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "path",
+      "label": "PHP endpoint path",
+      "type": "text",
+      "default": "/index.php"
+    },
+    {
+      "name": "forge-page",
+      "label": "Forge page (hex, e.g. 0x1e3)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "pointer-floor",
+      "label": "Pointer floor (hex, e.g. 0x6f0000000000)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "heap-from-lib-delta",
+      "label": "Heap-from-lib delta (hex, e.g. 0x3400000)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "zval-ptr-dtor-offset",
+      "label": "zval_ptr_dtor offset (hex, e.g. 0x7ae960)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "rce-block-offset",
+      "label": "RCE block offset (hex, e.g. 0x5c400)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "name": "rce-headers",
+      "label": "RCE header count (default: 402500)",
+      "type": "text",
+      "default": ""
+    }
+  ]
+}
