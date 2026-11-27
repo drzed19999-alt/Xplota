@@ -102,6 +102,23 @@ export async function render(container) {
         </div>
       </div>
     </div>
+
+    <div class="panel vuln-saved-panel" id="vulnSavedPanel">
+      <div class="vuln-saved-head">
+        <div class="vuln-saved-title">
+          <span>🚨</span>
+          <span>Saved Vulnerable Sites</span>
+          <span class="pipeline-pane-count vuln-count-badge" id="vulnSavedCount">0</span>
+        </div>
+        <div class="vuln-saved-actions">
+          <button class="evidence-btn" id="vulnCopyBtn" title="Copy all vulnerable targets">Copy All</button>
+          <button class="evidence-btn vuln-clear-btn" id="vulnClearBtn" title="Clear saved vulnerable sites">Clear</button>
+        </div>
+      </div>
+      <div class="vuln-saved-list" id="vulnSavedList">
+        <div class="pipeline-empty" style="padding:24px;">No vulnerable sites saved yet.</div>
+      </div>
+    </div>
   `;
 
   /* ---- DOM refs ---- */
@@ -119,6 +136,8 @@ export async function render(container) {
     statHitRate: $("statHitRate"),
     discoveryFeed: $("discoveryFeed"), scannerFeed: $("scannerFeed"),
     discoveryCount: $("discoveryCount"), scannerCount: $("scannerCount"),
+    vulnSavedList: $("vulnSavedList"), vulnSavedCount: $("vulnSavedCount"),
+    vulnCopyBtn: $("vulnCopyBtn"), vulnClearBtn: $("vulnClearBtn"),
   };
 
   let controller = null;
@@ -305,6 +324,106 @@ export async function render(container) {
     if (status === "vulnerable" && row.parentElement) row.parentElement.prepend(row);
   }
 
+  /* ---- saved vulnerable sites panel ---- */
+  const savedVulns = new Map();
+
+  function fmtTime(iso) {
+    if (!iso) return "";
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  }
+
+  function renderSavedVulns() {
+    el.vulnSavedCount.textContent = String(savedVulns.size);
+    if (!savedVulns.size) {
+      el.vulnSavedList.innerHTML = `<div class="pipeline-empty" style="padding:24px;">No vulnerable sites saved yet.</div>`;
+      return;
+    }
+    el.vulnSavedList.innerHTML = "";
+    for (const site of savedVulns.values()) {
+      const row = document.createElement("div");
+      row.className = "pipeline-row vulnerable vuln-saved-row";
+
+      const dom = document.createElement("span");
+      dom.className = "domain";
+      dom.textContent = site.target || site.domain;
+      dom.title = site.target || site.domain;
+
+      const sig = document.createElement("span");
+      sig.className = "signal";
+      const parts = [site.vuln_type || "php2shell"];
+      if (site.php_version) parts.push(site.php_version);
+      if (site.reason) parts.push(site.reason);
+      sig.textContent = parts.join(" · ");
+      sig.title = sig.textContent;
+
+      const ts = document.createElement("span");
+      ts.className = "vuln-saved-time";
+      ts.textContent = fmtTime(site.found_at);
+
+      row.append(dom, sig, ts);
+
+      if (site.source) {
+        const src = document.createElement("span");
+        src.className = `pipe-badge ${site.source === "ct" ? "ct" : "queued"}`;
+        src.textContent = site.source.toUpperCase();
+        row.appendChild(src);
+      }
+
+      const b = document.createElement("span");
+      b.className = "pipe-badge vuln";
+      b.textContent = "VULN";
+      row.appendChild(b);
+
+      el.vulnSavedList.appendChild(row);
+    }
+  }
+
+  function upsertSavedVuln(site) {
+    if (!site || !(site.domain || site.target)) return;
+    const key = domainOf(site.domain || site.target);
+    // Re-insert at front so newest appears first
+    const ordered = new Map([[key, site]]);
+    for (const [k, v] of savedVulns.entries()) {
+      if (k !== key) ordered.set(k, v);
+    }
+    savedVulns.clear();
+    for (const [k, v] of ordered.entries()) savedVulns.set(k, v);
+    renderSavedVulns();
+  }
+
+  async function loadSavedVulns() {
+    try {
+      const res = await fetch("/api/pipeline/vulnerable");
+      if (!res.ok) return;
+      const data = await res.json();
+      savedVulns.clear();
+      for (const s of (data.sites || [])) {
+        const key = domainOf(s.domain || s.target || "");
+        if (key && !savedVulns.has(key)) savedVulns.set(key, s);
+      }
+      renderSavedVulns();
+    } catch {}
+  }
+
+  el.vulnCopyBtn.onclick = async () => {
+    const list = Array.from(savedVulns.values()).map((s) => s.target || s.domain).join("\n");
+    if (!list) return;
+    try {
+      await navigator.clipboard.writeText(list);
+      const orig = el.vulnCopyBtn.textContent;
+      el.vulnCopyBtn.textContent = "Copied!";
+      setTimeout(() => { el.vulnCopyBtn.textContent = orig; }, 1500);
+    } catch {}
+  };
+
+  el.vulnClearBtn.onclick = async () => {
+    try {
+      await fetch("/api/pipeline/vulnerable", { method: "DELETE" });
+      savedVulns.clear();
+      renderSavedVulns();
+    } catch {}
+  };
+
   /* ---- stream handler ---- */
   function handleEv(ev) {
     if (ev.stats) updateStats(ev.stats);
@@ -337,6 +456,9 @@ export async function render(container) {
           const d = domainOf(ev.target);
           const st = ev.vulnerable === true ? "vulnerable" : ev.vulnerable === false ? "clean" : "error";
           upsertScanRow(d, st, ev.vuln_type || ev.reason || ev.error || "");
+          if (ev.vulnerable === true && ev.saved_vuln) {
+            upsertSavedVuln(ev.saved_vuln);
+          }
         }
         break;
       case "scan_error":
@@ -439,7 +561,8 @@ export async function render(container) {
     el.stopBtn.disabled = false;
   };
 
-  /* ---- init: reconnect if already running ---- */
+  /* ---- init: load saved vulnerable sites & reconnect if running ---- */
+  loadSavedVulns();
   try {
     const res = await fetch("/api/pipeline/status");
     if (res.ok) {

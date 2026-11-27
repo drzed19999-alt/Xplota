@@ -28,6 +28,7 @@ from core import (
     scan_domains,
 )
 from core.pipeline import pipeline
+from core.vuln_store import clear_vulnerable_sites, load_vulnerable_sites
 
 app = FastAPI(title="Domain Tool")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -221,6 +222,17 @@ async def api_pipeline_stop():
 @app.get("/api/pipeline/status")
 async def api_pipeline_status():
     return pipeline.snapshot()
+
+
+@app.get("/api/pipeline/vulnerable")
+async def api_pipeline_vulnerable():
+    return {"sites": load_vulnerable_sites()}
+
+
+@app.delete("/api/pipeline/vulnerable")
+async def api_pipeline_clear_vulnerable():
+    clear_vulnerable_sites()
+    return {"status": "cleared"}
 
 
 @app.get("/api/pipeline/stream")

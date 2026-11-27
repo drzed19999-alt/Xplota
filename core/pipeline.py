@@ -24,6 +24,7 @@ from typing import Any
 from core.domain_gen import DEFAULT_TLDS, clean, generate_names, scan_domains
 from core.scanner_runner import get_scanner, run_scanner
 from core.smart_sources import PHP_HEAVY_TLDS, canonical_host, ct_batch_stream
+from core.vuln_store import save_vulnerable_site
 
 # Extra word suffixes used in continuous-mode variation waves
 _WORD_SUFFIXES = [
@@ -122,6 +123,7 @@ class Pipeline:
         self._php_targets: list[dict] = []
         self._results: list[dict] = []
         self._seen_roots: set[str] = set()
+        self._target_meta: dict[str, dict[str, Any]] = {}
 
     # -- public ---------------------------------------------------------
 
@@ -138,6 +140,7 @@ class Pipeline:
             self._php_targets.clear()
             self._results.clear()
             self._seen_roots.clear()
+            self._target_meta.clear()
             self._task = asyncio.create_task(self._run(**kw))
             return True
 
@@ -345,6 +348,10 @@ class Pipeline:
                         "signals": r.php_signals,
                         "source": source,
                     })
+                    self._target_meta[canonical_host(r.domain)] = {
+                        "source": source,
+                        "signals": r.php_signals,
+                    }
                     target = r.target_url or r.domain
                     try:
                         scan_queue.put_nowait(target)
@@ -403,6 +410,15 @@ class Pipeline:
                             self.state.scanned += 1
                             if ev.get("vulnerable") is True:
                                 self.state.vulnerable += 1
+                                meta = self._target_meta.get(canonical_host(ev.get("target") or ""), {})
+                                ev["saved_vuln"] = save_vulnerable_site({
+                                    "target": ev.get("target") or "",
+                                    "vuln_type": ev.get("vuln_type") or "php2shell",
+                                    "reason": ev.get("reason") or "",
+                                    "php_version": ev.get("php_version") or "",
+                                    "source": meta.get("source", ""),
+                                    "signals": meta.get("signals", []),
+                                })
                             elif ev.get("vulnerable") is False:
                                 self.state.scan_clean += 1
                             else:
