@@ -1,0 +1,18 @@
+{
+  "name": "PHP2Shell Session-Poison UAF (Syrex1013)",
+  "category": "php2shell",
+  "description": "Full CVE-2026-109618/109619 session-file poisoning + UAF + LFI chain. Works on mod_php AND PHP-FPM. HTTPS supported. Three modes: uaf / lfi / race. Syrex1013's poc.py.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "Command to execute", "type": "text", "default": "id"},
+    {"name": "modes", "label": "Attack modes (all / uaf / lfi / race)", "type": "text", "default": "all"},
+    {"name": "rounds", "label": "Exploitation rounds per target", "type": "text", "default": "5"},
+    {"name": "lfi-param", "label": "LFI parameter name (if known)", "type": "text", "default": ""},
+    {"name": "probe-only", "label": "Probe only (skip full exploit)", "type": "toggle", "default": false}
+  ]
+}

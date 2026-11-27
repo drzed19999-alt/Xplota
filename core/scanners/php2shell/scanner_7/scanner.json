@@ -1,0 +1,15 @@
+{
+  "name": "PHP2Shell Multi-Chain (Ikow)",
+  "category": "php2shell",
+  "description": "Three-chain CVE-2026-109618/109619 tool: OOM trigger probe + Session LFI (chain A) + Handler mismatch RCE (chain C). Probe-only mode for fast detection, full chain for exploitation. HTTPS supported.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "RCE command (empty = probe only)", "type": "text", "default": ""},
+    {"name": "probe-only", "label": "Probe only (skip RCE chain)", "type": "toggle", "default": false}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "PHP2Shell FPM Stale-Ptr Probe (0x4148)",
+  "category": "php2shell",
+  "description": "CVE-2026-109619 stale-pointer UAF probe targeting PHP-FPM + nginx (fastcgi_request_buffering off). Proves the vulnerable code path without ASAN. PHP 8.4.4-fpm tested. Fast multi-threaded probe — not a full RCE chain.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "stall", "label": "Stall between upload bursts (seconds)", "type": "text", "default": "1.5"},
+    {"name": "rounds", "label": "Probe rounds per target", "type": "text", "default": "3"}
+  ]
+}

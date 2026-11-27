@@ -1,0 +1,14 @@
+{
+  "name": "PHP2Shell OOM Sink (Cookiengineer)",
+  "category": "php2shell",
+  "description": "Standalone CVE-2026-109618 incomplete-bucket/object-destruction RCE sink. Works when CVE-2026-109619 disclosure stage fails. Targets Apache/mod_php over plain HTTP. Cookiengineer's actual-php2shell exploit.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "RCE command (empty = default)", "type": "text", "default": ""}
+  ]
+}

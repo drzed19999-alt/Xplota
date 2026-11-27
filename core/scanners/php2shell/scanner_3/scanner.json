@@ -1,0 +1,17 @@
+{
+  "name": "PHP2Shell FPM RCE (Eness)",
+  "category": "php2shell",
+  "description": "CVE-2026-109618/109619 RCE chain targeting Apache/mod_php 8.4.26 (bookworm profile). Supports HTTPS. Uses Eness PoC (poc_109618.py) with 3-stage OOM disclosure + RCE sink. Complements scanner_2 which targets 8.5.11.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "RCE command (empty = default proof cmd)", "type": "text", "default": ""},
+    {"name": "profile", "label": "Build profile (bookworm / lab)", "type": "text", "default": "bookworm"},
+    {"name": "zif-offset", "label": "zif_system offset (hex, leave empty for profile default)", "type": "text", "default": ""},
+    {"name": "dtor-offset", "label": "zval_ptr_dtor offset (hex, leave empty for profile default)", "type": "text", "default": ""}
+  ]
+}

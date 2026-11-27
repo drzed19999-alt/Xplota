@@ -1,0 +1,16 @@
+{
+  "name": "PHP2Shell ASLR Chain (9bie)",
+  "category": "php2shell",
+  "description": "Original A1/B1/A2/B2 four-step ASLR bypass chain for CVE-2026-109618/109619. Targets PHP 8.4.26-apache mod_php prefork over plain HTTP. Different heap geometry tuning from scanner_2 (52704). By 9bie.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": false, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "RCE command (empty = default proof)", "type": "text", "default": ""},
+    {"name": "workers", "label": "Apache MaxRequestWorkers", "type": "text", "default": "150"},
+    {"name": "arch", "label": "Build profile (auto / php84bookworm)", "type": "text", "default": "auto"}
+  ]
+}

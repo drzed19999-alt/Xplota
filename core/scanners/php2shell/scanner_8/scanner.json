@@ -1,0 +1,14 @@
+{
+  "name": "PHP2Shell mod_php Leak Chain (Murrez)",
+  "category": "php2shell",
+  "description": "mod_php/cli-server leak → zif_system chain for CVE-2026-109618/109619. Auto-detects PHP 8.4.x via X-Powered-By. HTTPS supported (uses requests library). Murrez's modphp_leak_chain.py adapter.",
+  "cves": "CVE-2026-109618 / CVE-2026-109619",
+  "options": {
+    "url": true, "list": true, "threads": true, "timeout": true,
+    "output": true, "all_results": true, "verbose": true, "no_color": true,
+    "path": false, "headers": false, "insecure": true, "follow_redirects": false
+  },
+  "extra_fields": [
+    {"name": "cmd", "label": "RCE command (empty = default)", "type": "text", "default": ""}
+  ]
+}
