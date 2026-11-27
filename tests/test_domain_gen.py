@@ -4,7 +4,8 @@ import sys
 import types
 import unittest
 
-from core.domain_gen import blend, check_php, clean, generate_names, resolve, scan_domains
+from core.domain_gen import _probe_php, blend, check_php, clean, generate_names, resolve, scan_domains
+from core.smart_sources import _ct_query_plan, canonical_host
 
 
 class FakeHeaders(dict):
@@ -160,6 +161,45 @@ class TestAsyncChecks(unittest.IsolatedAsyncioTestCase):
                 sys.modules.pop("httpx", None)
             else:
                 sys.modules["httpx"] = prev
+
+    async def test_probe_php_http_fallback_and_cms_markers(self):
+        class HttpOnlyCmsClient:
+            async def get(self, url, **kwargs):
+                if url.startswith("https://"):
+                    raise ConnectionError("no tls")
+                return FakeResponse(
+                    200,
+                    headers={
+                        "X-Pingback": "http://legacy.example/xmlrpc.php",
+                        "Link": '<http://legacy.example/wp-json/>; rel="https://api.w.org/"',
+                    },
+                    cookies=["laravel_session=xyz; path=/"],
+                    text='<meta name="generator" content="Joomla! 3.10"><link href="/sites/default/files/a.css">',
+                    url="http://legacy.example/",
+                )
+
+        signals, err, target_url = await _probe_php("legacy.example", HttpOnlyCmsClient())
+        self.assertIsNone(err)
+        self.assertEqual(target_url, "http://legacy.example")
+        self.assertIn("WordPress X-Pingback header", signals)
+        self.assertIn("WordPress REST API Link header", signals)
+        self.assertIn("Laravel session cookie", signals)
+        self.assertIn("Drupal paths", signals)
+        self.assertTrue(any(s.startswith("CMS generator: joomla") for s in signals))
+
+    def test_smart_sources_canonical_and_query_plan(self):
+        self.assertEqual(canonical_host("www.Example.COM"), "example.com")
+        self.assertEqual(canonical_host("www.com"), "www.com")
+
+        import itertools
+        non_cont = list(_ct_query_plan(["shop"], continuous=False))
+        cont = list(itertools.islice(_ct_query_plan(["shop"], continuous=True), 500))
+        self.assertGreater(len(cont), len(non_cont))
+        waves = {w for w, _ in non_cont}
+        self.assertEqual(waves, {0, 1, 2})
+        self.assertIn((0, "%shop%"), non_cont)
+        self.assertIn((1, "shop-a%"), non_cont)
+        self.assertIn((2, "shop%.com"), non_cont)
 
 
 if __name__ == "__main__":

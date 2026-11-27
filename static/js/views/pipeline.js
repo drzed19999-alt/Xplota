@@ -21,7 +21,7 @@ export async function render(container) {
         <dt-toggle id="pipeSmart" label="⚡ smart mode" checked></dt-toggle>
         <dt-toggle id="pipeContinuous" label="continuous mode" checked></dt-toggle>
         <dt-toggle id="pipeHyphens" label="hyphens"></dt-toggle>
-        <dt-toggle id="pipeInsecure" label="skip TLS"></dt-toggle>
+        <dt-toggle id="pipeInsecure" label="skip TLS" checked></dt-toggle>
         <dt-toggle id="pipeRedirects" label="follow redirects" checked></dt-toggle>
         <label class="numfield">SAPI
           <select class="dt-select" id="pipeSapi">
@@ -312,7 +312,7 @@ export async function render(container) {
     switch (ev.type) {
       case "snapshot":
         if (ev.running) showRunning(ev);
-        (ev.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals }));
+        (ev.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals, source: t.source }));
         (ev.scan_results || []).forEach((r) => {
           const d = domainOf(r.target || "");
           const st = r.vulnerable === true ? "vulnerable" : r.vulnerable === false ? "clean" : "error";
@@ -329,7 +329,7 @@ export async function render(container) {
         showSource(ev.source);
         break;
       case "scan_start":
-        (ev.targets || []).forEach((t) => upsertScanRow(t, "scanning", ""));
+        (ev.targets || []).forEach((t) => upsertScanRow(domainOf(t), "scanning", ""));
         break;
       case "live_result":
       case "result":
@@ -340,7 +340,7 @@ export async function render(container) {
         }
         break;
       case "scan_error":
-        (ev.targets || []).forEach((t) => upsertScanRow(t, "error", ev.error || "scan error"));
+        (ev.targets || []).forEach((t) => upsertScanRow(domainOf(t), "error", ev.error || "scan error"));
         break;
       case "discovery_done":
         el.status.textContent = "Discovery complete — draining scanner queue…";
@@ -446,7 +446,7 @@ export async function render(container) {
       const data = await res.json();
       if (data.running) {
         showRunning(data);
-        (data.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals }));
+        (data.php_targets || []).forEach((t) => addDiscRow({ type: "php_found", domain: t.domain, php_signals: t.signals, source: t.source }));
         (data.scan_results || []).forEach((r) => {
           const d = domainOf(r.target || "");
           const st = r.vulnerable === true ? "vulnerable" : r.vulnerable === false ? "clean" : "error";

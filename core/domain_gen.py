@@ -4,6 +4,7 @@ checks. Pure logic only -- no FastAPI / HTTP routing here.
 """
 
 import asyncio
+import concurrent.futures
 import itertools
 import re
 import socket
@@ -69,6 +70,7 @@ class DomainResult:
     available: bool | None = None
     php_signals: list = field(default_factory=list)
     error: str | None = None
+    target_url: str | None = None
 
 
 DOH_URL = "https://cloudflare-dns.com/dns-query"
@@ -77,28 +79,46 @@ DOH_FALLBACK_URL = "https://dns.google/resolve"
 # Cooldown timestamp when primary DoH hits ConnectTimeout/ConnectError
 _doh_cooldown_until: float = 0.0
 
+# Dedicated DNS threadpool + concurrency cap so getaddrinfo never stalls behind
+# asyncio's small default executor or overwhelms local NAT DNS forwarders.
+_dns_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=64, thread_name_prefix="xplota_dns"
+)
+_DNS_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
 
-async def resolve_system(domain: str, timeout: float = 4.0) -> tuple[bool | None, str | None]:
-    """Resolve via the OS DNS resolver (getaddrinfo).
-    Returns (False, None) if an A/AAAA record exists, (True, None) on NXDOMAIN/no data,
+
+def _get_dns_semaphore() -> asyncio.Semaphore:
+    loop_id = id(asyncio.get_running_loop())
+    sem = _DNS_SEMAPHORES.get(loop_id)
+    if sem is None:
+        sem = asyncio.Semaphore(24)
+        _DNS_SEMAPHORES[loop_id] = sem
+    return sem
+
+
+async def resolve_system(domain: str, timeout: float = 3.0) -> tuple[bool | None, str | None]:
+    """Resolve via the OS DNS resolver (getaddrinfo IPv4 on a dedicated pool).
+    Returns (False, None) if an A record exists, (True, None) on NXDOMAIN/no data,
     or (None, error) on timeout/other failure."""
     loop = asyncio.get_running_loop()
+    sem = _get_dns_semaphore()
     try:
-        await asyncio.wait_for(
-            loop.getaddrinfo(domain, None, type=socket.SOCK_STREAM),
-            timeout=timeout,
-        )
-        return False, None
+        async with sem:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    _dns_executor,
+                    socket.getaddrinfo,
+                    domain,
+                    None,
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                ),
+                timeout=timeout,
+            )
+            return False, None
     except asyncio.TimeoutError:
         return None, "DNS error: SystemTimeout"
-    except socket.gaierror as e:
-        # EAI_NONAME / EAI_NODATA -> domain does not resolve
-        noname_codes = {
-            getattr(socket, "EAI_NONAME", -2),
-            getattr(socket, "EAI_NODATA", -5),
-        }
-        if e.errno in noname_codes or "not known" in str(e).lower() or "no address" in str(e).lower():
-            return True, None
+    except socket.gaierror:
         return True, None
     except Exception as e:
         return None, f"DNS error: {type(e).__name__}"
@@ -139,38 +159,109 @@ async def resolve(domain: str, timeout: float = 4.0, client=None,
             await client.aclose()
 
 
-async def check_php(domain: str, client, timeout: float = 6.0) -> tuple[list[str], str | None]:
-    """Passive fingerprint via one normal GET to the homepage."""
-    signals = []
+_PHP_COOKIES = (
+    ("phpsessid", "PHPSESSID cookie"),
+    ("laravel_session", "Laravel session cookie"),
+    ("wordpress_test_cookie", "WordPress cookie"),
+    ("wp-settings-", "WordPress cookie"),
+    ("woocommerce_items_in_cart", "WooCommerce cookie"),
+    ("wp_woocommerce_session", "WooCommerce cookie"),
+    ("prestashop-", "PrestaShop cookie"),
+    ("ocsessid", "OpenCart cookie"),
+    ("moodlesession", "Moodle cookie"),
+    ("phpbb3_", "phpBB cookie"),
+    ("xf_session", "XenForo cookie"),
+    ("ci_session", "CodeIgniter cookie"),
+    ("cakephp", "CakePHP cookie"),
+)
+
+_PHP_GENERATOR_RE = re.compile(
+    r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\']*'
+    r'(?:wordpress|joomla|drupal|prestashop|magento|opencart|typo3|mediawiki|moodle|vbulletin|phpbb)'
+    r'[^"\']*)',
+    re.IGNORECASE,
+)
+
+
+async def _probe_php(domain: str, client, timeout: float | None = 5.0) -> tuple[list[str], str | None, str | None]:
+    """Passive fingerprint via one normal GET to the homepage.
+    Returns (signals, error, working_target_url)."""
+    signals: list[str] = []
     resp = None
     last_err = None
+    working_scheme = None
+    req_kwargs: dict = {"follow_redirects": True}
+    if timeout is not None:
+        req_kwargs["timeout"] = timeout
     for scheme in ("https", "http"):
         try:
-            resp = await client.get(f"{scheme}://{domain}", timeout=timeout, follow_redirects=True)
+            resp = await client.get(f"{scheme}://{domain}", **req_kwargs)
+            working_scheme = scheme
             break
         except Exception as e:
             last_err = e
     if resp is None:
-        return signals, f"HTTP error: {type(last_err).__name__}"
+        return signals, f"HTTP error: {type(last_err).__name__}", None
 
     headers = resp.headers
     body = resp.text[:200_000].lower()
-    final_url = str(resp.url).lower()
+    final_url_raw = str(resp.url)
+    final_url = final_url_raw.lower()
+
+    # Determine concrete target URL to pass to scanners (preserve scheme + .php path if redirected)
+    target_url = final_url_raw if ".php" in final_url else f"{working_scheme}://{domain}"
 
     if "php" in headers.get("x-powered-by", "").lower():
         signals.append(f"X-Powered-By: {headers.get('x-powered-by')}")
     if "php" in headers.get("server", "").lower():
         signals.append(f"Server: {headers.get('server')}")
+    if headers.get("x-pingback"):
+        signals.append("WordPress X-Pingback header")
+    if "wp-json" in headers.get("link", "").lower() or "api.w.org" in headers.get("link", "").lower():
+        signals.append("WordPress REST API Link header")
+    x_gen = headers.get("x-generator", "")
+    if any(k in x_gen.lower() for k in ("php", "wordpress", "joomla", "drupal", "prestashop", "typo3", "mediawiki", "moodle")):
+        signals.append(f"X-Generator: {x_gen}")
+    if headers.get("x-drupal-cache") or headers.get("x-drupal-dynamic-cache"):
+        signals.append("Drupal cache header")
+    if headers.get("x-magento-tags") or headers.get("x-magento-cache-debug"):
+        signals.append("Magento cache header")
+
     cookies = resp.headers.get_list("set-cookie") if hasattr(headers, "get_list") else []
-    if any("phpsessid" in c.lower() for c in cookies):
-        signals.append("PHPSESSID cookie")
+    cookie_blob = "\n".join(c.lower() for c in cookies)
+    matched_cookie_labels: set[str] = set()
+    for needle, label in _PHP_COOKIES:
+        if needle in cookie_blob and label not in matched_cookie_labels:
+            matched_cookie_labels.add(label)
+            signals.append(label)
+    if re.search(r'(?:^|[;\s])s?sess[0-9a-f]{32}=', cookie_blob):
+        signals.append("Drupal session cookie")
+
     if ".php" in final_url:
         signals.append("URL ends in .php")
-    if re.search(r'(href|action|src)=["\'][^"\']*\.php', body):
+    if re.search(r'(?:href|action|src)=["\'][^"\']*\.php|/index\.php\?', body):
         signals.append(".php links in page")
-    if "wp-content" in body or "wp-includes" in body:
+    if any(m in body for m in ("wp-content", "wp-includes", "/wp-json/", "api.w.org", "xmlrpc.php")):
         signals.append("WordPress (PHP) paths")
-    return signals, None
+    gen_match = _PHP_GENERATOR_RE.search(body)
+    if gen_match and not ("wordpress" in gen_match.group(1) and any("WordPress" in s for s in signals)):
+        signals.append(f"CMS generator: {gen_match.group(1)[:40]}")
+    if "/sites/default/files/" in body:
+        signals.append("Drupal paths")
+    if "/media/jui/" in body or "/components/com_" in body:
+        signals.append("Joomla paths")
+    if "catalog/view/theme/" in body:
+        signals.append("OpenCart paths")
+    if "skin/frontend/" in body or "pub/static/frontend/" in body:
+        signals.append("Magento paths")
+
+    return signals, None, target_url
+
+
+async def check_php(domain: str, client, timeout: float = 6.0) -> tuple[list[str], str | None]:
+    """Passive fingerprint via one normal GET to the homepage."""
+    signals, err, _ = await _probe_php(domain, client, timeout=timeout)
+    return signals, err
 
 
 async def scan_domains(domains, do_check: bool, do_php: bool,
@@ -192,7 +283,21 @@ async def scan_domains(domains, do_check: bool, do_php: bool,
     total = len(domains)
     done = 0
 
-    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0 (compatible; domain-tool/1.0)"}) as client:
+    client_kwargs: dict = {
+        "headers": {"User-Agent": "Mozilla/5.0 (compatible; domain-tool/1.0)"},
+        "verify": False,
+    }
+    timeout_cls = getattr(httpx, "Timeout", None)
+    if timeout_cls is not None:
+        client_kwargs["timeout"] = timeout_cls(timeout=5.0, connect=2.5)
+    limits_cls = getattr(httpx, "Limits", None)
+    if limits_cls is not None:
+        client_kwargs["limits"] = limits_cls(
+            max_connections=max(concurrency + 20, 100),
+            max_keepalive_connections=min(concurrency, 50),
+        )
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
 
         async def _resolve_domain(domain: str) -> tuple[bool | None, str | None]:
             global _doh_cooldown_until
@@ -222,11 +327,19 @@ async def scan_domains(domains, do_check: bool, do_php: bool,
                     if do_check or do_php:
                         avail, dns_err = await _resolve_domain(domain)
                         result.available = avail
-                        if dns_err:
+                        # If do_check is False (e.g. CT domains), still run PHP probe
+                        # even on a transient DNS timeout so live sites aren't dropped.
+                        should_probe = do_php and (
+                            avail is False or (dns_err is not None and not do_check)
+                        )
+                        if dns_err and not should_probe:
                             result.error = dns_err
-                        elif do_php and avail is False:
-                            signals, http_err = await check_php(domain, client)
+                        elif should_probe:
+                            if dns_err:
+                                result.available = False
+                            signals, http_err, target_url = await _probe_php(domain, client, timeout=None)
                             result.php_signals = signals
+                            result.target_url = target_url
                             if http_err and not signals:
                                 result.error = http_err
                 except Exception as e:
