@@ -1,15 +1,20 @@
 """
 Pipeline engine — continuous domain discovery → PHP fingerprint → php2shell scan.
 
-The pipeline generates domains from keywords, checks DNS + PHP fingerprints,
-and automatically feeds PHP-detected sites into the php2shell vulnerability
-scanner.  It runs until all combinations are exhausted (or forever in
-continuous mode) and can be stopped by the admin at any time.
+The pipeline finds PHP sites and feeds them into the php2shell vulnerability
+scanner.  Three discovery modes:
+
+  smart  — Certificate Transparency logs first (real domains), then expanded
+           keyword generation.  10–50× higher PHP hit rate.
+  generate — Original brute-force keyword → domain generation.
+  wordlist — Scan a provided list of domains.
+
+It runs until all sources are exhausted (or forever in continuous mode) and
+can be stopped by the admin at any time.
 """
 
 import asyncio
 import contextlib
-import itertools
 import string
 import time
 from dataclasses import dataclass, field
@@ -17,6 +22,11 @@ from typing import Any
 
 from core.domain_gen import DEFAULT_TLDS, clean, generate_names, scan_domains
 from core.scanner_runner import get_scanner, run_scanner
+from core.smart_sources import (
+    ct_domain_stream,
+    expand_keywords_for_php,
+    PHP_HEAVY_TLDS,
+)
 
 # Extra word suffixes used in continuous-mode variation waves
 _WORD_SUFFIXES = [
@@ -89,6 +99,8 @@ class _Stats:
     scan_errors: int = 0
     wave: int = 0
     phase: str = "idle"
+    source: str = ""  # "ct", "generate", "wordlist"
+    ct_fetched: int = 0  # domains pulled from CT logs
 
     def to_dict(self) -> dict[str, Any]:
         elapsed = time.time() - self.started_at if self.started_at else 0
@@ -177,7 +189,7 @@ class Pipeline:
                    batch_size=50, concurrency=50, continuous=True,
                    scanner_threads=5, scanner_timeout=60, insecure=False,
                    follow_redirects=True, sapi="auto", scan_paths=None,
-                   scan_headers=None, wordlist=None):
+                   scan_headers=None, wordlist=None, smart_mode=True):
 
         scan_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=500)
         scanner = get_scanner("php2shell/scanner_1")
@@ -192,32 +204,74 @@ class Pipeline:
         try:
             self.state.phase = "discovering"
 
-            # 1) Process word-list entries first
+            # 1) Process word-list entries first (highest priority)
             extra = [w.strip() for w in (wordlist or []) if w.strip() and not w.startswith("#")]
-            batch: list[str] = []
-            for d in extra:
-                if self._stop.is_set():
-                    break
-                self.state.domains_generated += 1
-                batch.append(d)
-                if len(batch) >= batch_size:
+            if extra:
+                self.state.source = "wordlist"
+                await self._emit({"type": "source_change", "source": "wordlist",
+                                  "count": len(extra), "stats": self.state.to_dict()})
+                batch: list[str] = []
+                for d in extra:
+                    if self._stop.is_set():
+                        break
+                    self.state.domains_generated += 1
+                    batch.append(d)
+                    if len(batch) >= batch_size:
+                        await self._check_batch(batch, concurrency, scan_queue)
+                        batch = []
+                if batch and not self._stop.is_set():
                     await self._check_batch(batch, concurrency, scan_queue)
-                    batch = []
 
-            # 2) Process generated domains
-            for wave, domain in _domain_stream(keywords, tlds, max_length, hyphens, continuous):
-                if self._stop.is_set():
-                    break
-                self.state.wave = wave
-                self.state.domains_generated += 1
-                batch.append(domain)
-                if len(batch) >= batch_size:
+            # 2) Smart mode: Certificate Transparency logs (real domains!)
+            if smart_mode and not self._stop.is_set():
+                self.state.source = "ct"
+                self.state.phase = "CT lookup"
+                await self._emit({"type": "source_change", "source": "ct",
+                                  "stats": self.state.to_dict()})
+
+                # Expand keywords for better CT coverage
+                ct_keywords = expand_keywords_for_php(keywords)
+                ct_batch: list[str] = []
+
+                async for domain in ct_domain_stream(ct_keywords, max_per_keyword=300):
+                    if self._stop.is_set():
+                        break
+                    self.state.ct_fetched += 1
+                    self.state.domains_generated += 1
+                    ct_batch.append(domain)
+                    if len(ct_batch) >= batch_size:
+                        # CT domains are known-registered — skip DNS, just PHP-fingerprint
+                        await self._check_batch_skip_dns(ct_batch, concurrency, scan_queue)
+                        ct_batch = []
+
+                if ct_batch and not self._stop.is_set():
+                    await self._check_batch_skip_dns(ct_batch, concurrency, scan_queue)
+
+            # 3) Generated domains (brute-force, lower yield)
+            if not self._stop.is_set():
+                self.state.source = "generate"
+                self.state.phase = "discovering"
+                await self._emit({"type": "source_change", "source": "generate",
+                                  "stats": self.state.to_dict()})
+
+                # In smart mode, use expanded keywords + PHP-heavy TLDs
+                gen_keywords = expand_keywords_for_php(keywords) if smart_mode else keywords
+                gen_tlds = PHP_HEAVY_TLDS if smart_mode else tlds
+
+                batch = []
+                for wave, domain in _domain_stream(gen_keywords, gen_tlds,
+                                                   max_length, hyphens, continuous):
+                    if self._stop.is_set():
+                        break
+                    self.state.wave = wave
+                    self.state.domains_generated += 1
+                    batch.append(domain)
+                    if len(batch) >= batch_size:
+                        await self._check_batch(batch, concurrency, scan_queue)
+                        batch = []
+
+                if batch and not self._stop.is_set():
                     await self._check_batch(batch, concurrency, scan_queue)
-                    batch = []
-
-            # Flush remaining
-            if batch and not self._stop.is_set():
-                await self._check_batch(batch, concurrency, scan_queue)
 
             # Signal scanner to finish
             self.state.phase = "draining"
@@ -240,7 +294,7 @@ class Pipeline:
             self.state.running = False
             await self._emit({"type": "error", "error": str(exc), "stats": self.state.to_dict()})
 
-    # -- discovery batch ------------------------------------------------
+    # -- discovery batch (with DNS check) --------------------------------
 
     async def _check_batch(self, domains: list[str], concurrency: int,
                            scan_queue: asyncio.Queue) -> None:
@@ -267,7 +321,42 @@ class Pipeline:
                     try:
                         scan_queue.put_nowait(r.domain)
                     except asyncio.QueueFull:
-                        pass  # scanner backed up — domain skipped
+                        pass
+                await self._emit(ev)
+
+    # -- discovery batch (skip DNS — for CT-sourced domains) -------------
+
+    async def _check_batch_skip_dns(self, domains: list[str], concurrency: int,
+                                    scan_queue: asyncio.Queue) -> None:
+        """Check domains for PHP without DNS resolution — used for CT log
+        domains that are known to exist (they have SSL certificates)."""
+        async with contextlib.aclosing(
+            scan_domains(domains, do_check=False, do_php=True,
+                         concurrency=concurrency, dns_mode="system")
+        ) as results:
+            async for r in results:
+                if self._stop.is_set():
+                    break
+                self.state.domains_checked += 1
+                # For CT domains, treat any that respond as "registered"
+                r.available = False
+                is_php = bool(r.php_signals)
+                ev: dict[str, Any] = {
+                    "type": "php_found" if is_php else "checked",
+                    "domain": r.domain,
+                    "available": False,
+                    "php_signals": r.php_signals,
+                    "error": r.error,
+                    "source": "ct",
+                    "stats": self.state.to_dict(),
+                }
+                if is_php:
+                    self.state.php_found += 1
+                    self._php_targets.append({"domain": r.domain, "signals": r.php_signals})
+                    try:
+                        scan_queue.put_nowait(r.domain)
+                    except asyncio.QueueFull:
+                        pass
                 await self._emit(ev)
 
     # -- scanner worker -------------------------------------------------

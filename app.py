@@ -173,6 +173,7 @@ class PipelineStartRequest(BaseModel):
     batch_size: int = Field(default=50, ge=10, le=500)
     concurrency: int = Field(default=50, ge=1, le=200)
     continuous: bool = True
+    smart_mode: bool = True
     scanner_threads: int = Field(default=5, ge=1, le=50)
     scanner_timeout: int = Field(default=60, ge=1, le=300)
     insecure: bool = False
@@ -204,6 +205,7 @@ async def api_pipeline_start(req: PipelineStartRequest):
         scan_paths=req.scan_paths,
         scan_headers=req.scan_headers,
         wordlist=req.wordlist,
+        smart_mode=req.smart_mode,
     )
     if not ok:
         raise HTTPException(status_code=409, detail="Pipeline is already running")

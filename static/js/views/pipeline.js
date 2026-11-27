@@ -18,6 +18,7 @@ export async function render(container) {
           selected="com,net,org,io,co"></dt-chip-group>
       </div>
       <div class="opts-row">
+        <dt-toggle id="pipeSmart" label="⚡ smart mode" checked></dt-toggle>
         <dt-toggle id="pipeContinuous" label="continuous mode" checked></dt-toggle>
         <dt-toggle id="pipeHyphens" label="hyphens"></dt-toggle>
         <dt-toggle id="pipeInsecure" label="skip TLS"></dt-toggle>
@@ -34,6 +35,10 @@ export async function render(container) {
         <label class="numfield">scan timeout <input type="text" id="pipeTimeout" value="60"></label>
         <label class="numfield">max len <input type="text" id="pipeMaxLen" value="15"></label>
       </div>
+      <div class="smart-hint" id="smartHint">
+        <span class="smart-icon">⚡</span>
+        <span>Smart mode searches <strong>Certificate Transparency logs</strong> for real domains first, then expands keywords with PHP/CMS terms. 10–50× higher PHP hit rate.</span>
+      </div>
       <div class="actions">
         <button class="primary" id="pipeStart">▶ Start Pipeline</button>
         <button class="primary pipe-stop-btn" id="pipeStop" style="display:none;">■ Stop Pipeline</button>
@@ -41,6 +46,7 @@ export async function render(container) {
           <span class="dot-pulse"></span>
           <span id="pipePhaseText">starting</span>
         </span>
+        <span class="pipeline-source-tag" id="sourceTag" style="display:none;"></span>
         <span class="hint" id="pipeStatus"></span>
       </div>
     </div>
@@ -65,6 +71,10 @@ export async function render(container) {
       <div class="pipeline-stat">
         <span class="pipeline-stat-value clean" id="statClean">0</span>
         <span class="pipeline-stat-label">clean</span>
+      </div>
+      <div class="pipeline-stat">
+        <span class="pipeline-stat-value" id="statHitRate">—</span>
+        <span class="pipeline-stat-label">hit rate</span>
       </div>
       <div class="pipeline-stat">
         <span class="pipeline-stat-value" id="statElapsed">0:00</span>
@@ -100,11 +110,13 @@ export async function render(container) {
     config: $("pipeConfig"), kw: $("pipeKw"), tlds: $("pipeTlds"),
     startBtn: $("pipeStart"), stopBtn: $("pipeStop"),
     phase: $("pipePhase"), phaseText: $("pipePhaseText"),
-    status: $("pipeStatus"),
+    status: $("pipeStatus"), sourceTag: $("sourceTag"),
+    smartToggle: $("pipeSmart"), smartHint: $("smartHint"),
     statsBar: $("statsBar"), splitView: $("splitView"),
     statChecked: $("statChecked"), statPhp: $("statPhp"),
     statScanned: $("statScanned"), statVuln: $("statVuln"),
     statClean: $("statClean"), statElapsed: $("statElapsed"),
+    statHitRate: $("statHitRate"),
     discoveryFeed: $("discoveryFeed"), scannerFeed: $("scannerFeed"),
     discoveryCount: $("discoveryCount"), scannerCount: $("scannerCount"),
   };
@@ -116,6 +128,13 @@ export async function render(container) {
   const scanRows = new Map();
   const MAX_DISC_ROWS = 150;
 
+  /* ---- smart mode hint toggle ---- */
+  function updateSmartHint() {
+    el.smartHint.style.display = el.smartToggle?.checked ? "flex" : "none";
+  }
+  if (el.smartToggle) el.smartToggle.addEventListener("change", updateSmartHint);
+  updateSmartHint();
+
   /* ---- helpers ---- */
   const fmtElapsed = (s) => {
     const sec = Math.floor(s), m = Math.floor(sec / 60);
@@ -124,6 +143,19 @@ export async function render(container) {
   };
   const domainOf = (url) => { try { return new URL(url).hostname; } catch { return url.replace(/^https?:\/\//, "").split("/")[0]; } };
   const clamp = (v, lo, hi, fb) => { const n = parseInt(v, 10); return Number.isNaN(n) ? fb : Math.max(lo, Math.min(hi, n)); };
+
+  /* ---- source tag ---- */
+  const SOURCE_LABELS = {
+    ct: "🔗 CT Logs",
+    generate: "🔄 Generated",
+    wordlist: "📋 Wordlist",
+  };
+  function showSource(src) {
+    if (!src) { el.sourceTag.style.display = "none"; return; }
+    el.sourceTag.textContent = SOURCE_LABELS[src] || src;
+    el.sourceTag.className = `pipeline-source-tag source-${src}`;
+    el.sourceTag.style.display = "inline-flex";
+  }
 
   /* ---- stats ---- */
   function updateStats(s) {
@@ -134,10 +166,20 @@ export async function render(container) {
     el.statClean.textContent = (s.scan_clean || 0).toLocaleString();
     el.discoveryCount.textContent = (s.domains_checked || 0).toLocaleString();
     el.scannerCount.textContent = (s.scanned || 0).toLocaleString();
+    // Hit rate
+    const checked = s.domains_checked || 0;
+    const phpFound = s.php_found || 0;
+    if (checked > 0) {
+      const pct = ((phpFound / checked) * 100).toFixed(1);
+      el.statHitRate.textContent = `${pct}%`;
+    } else {
+      el.statHitRate.textContent = "—";
+    }
     if (s.phase && s.running) {
-      el.phaseText.textContent = s.phase;
+      el.phaseText.textContent = s.source ? `${s.phase} (${s.source})` : s.phase;
       el.phase.style.display = "inline-flex";
     }
+    if (s.source) showSource(s.source);
   }
 
   function showRunning(stats) {
@@ -157,6 +199,7 @@ export async function render(container) {
     el.startBtn.disabled = false;
     el.stopBtn.style.display = "none";
     el.phase.style.display = "none";
+    el.sourceTag.style.display = "none";
     if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
     container.querySelectorAll("#pipeConfig input, #pipeConfig select, #pipeConfig dt-toggle, #pipeConfig dt-chip-group, #pipeConfig dt-input")
       .forEach((x) => { x.style.pointerEvents = ""; x.style.opacity = ""; });
@@ -173,8 +216,9 @@ export async function render(container) {
   /* ---- discovery feed (left pane) ---- */
   function addDiscRow(ev) {
     const isPhp = ev.type === "php_found";
+    const isCt = ev.source === "ct";
     const row = document.createElement("div");
-    row.className = `pipeline-row${isPhp ? " php-found" : ""}`;
+    row.className = `pipeline-row${isPhp ? " php-found" : ""}${isCt ? " ct-source" : ""}`;
 
     const dom = document.createElement("span");
     dom.className = "domain";
@@ -193,6 +237,12 @@ export async function render(container) {
       b.className = "pipe-badge php";
       b.textContent = "PHP";
       row.appendChild(b);
+    }
+    if (isCt) {
+      const c = document.createElement("span");
+      c.className = "pipe-badge ct";
+      c.textContent = "CT";
+      row.appendChild(c);
     }
 
     el.discoveryFeed.appendChild(row);
@@ -275,6 +325,9 @@ export async function render(container) {
         addDiscRow(ev);
         upsertScanRow(ev.domain, "queued", (ev.php_signals || []).join(", "));
         break;
+      case "source_change":
+        showSource(ev.source);
+        break;
       case "scan_start":
         (ev.targets || []).forEach((t) => upsertScanRow(t, "scanning", ""));
         break;
@@ -345,6 +398,7 @@ export async function render(container) {
       max_length: clamp($("pipeMaxLen")?.value, 3, 63, 15),
       hyphens: Boolean($("pipeHyphens")?.checked),
       continuous: Boolean($("pipeContinuous")?.checked),
+      smart_mode: Boolean($("pipeSmart")?.checked),
       batch_size: clamp($("pipeBatch")?.value, 10, 500, 50),
       concurrency: clamp($("pipeConcurrency")?.value, 1, 200, 50),
       scanner_timeout: clamp($("pipeTimeout")?.value, 1, 300, 60),
