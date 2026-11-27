@@ -29,7 +29,7 @@ CVES = "CVE-2026-109618 / CVE-2026-109619"
 
 # Absolute path of the exploit, relative to this file's directory tree.
 _HERE = Path(__file__).resolve().parent
-_EXPLOIT = _HERE.parents[3] / "xplotas" / "php2shell" / "xplota_1" / "52704.py"
+_EXPLOIT = _HERE.parents[2] / "xplotas" / "php2shell" / "xplota_1" / "52704.py"
 
 # Exit-code meanings for 52704.py:
 #   0  → full chain succeeded (or disclosure only, without --rce)
