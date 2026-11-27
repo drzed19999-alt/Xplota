@@ -45,13 +45,31 @@ _INCON_EXIT  = {3, 4, 5, 6}
 
 
 def _parse_host_port(raw: str) -> tuple[str, int]:
-    """Extract (host, port) from a URL like http://1.2.3.4:8080 or bare host."""
+    """Extract (host, port) from a URL like http://1.2.3.4:8080 or bare host.
+
+    52704.py uses raw TCP sockets with no TLS, so for https:// targets we
+    default to port 80 and warn — the caller must ensure the target exposes
+    plain HTTP (or the user should supply an explicit http:// URL / port).
+    """
     raw = raw.strip()
     if "://" not in raw:
         raw = "http://" + raw
     p = urlsplit(raw)
     host = p.hostname or raw
-    port = p.port or 80
+    # Explicit port wins; fall back based on scheme.
+    if p.port:
+        port = p.port
+    elif p.scheme == "https":
+        # 52704.py has no TLS; try port 80 (plain HTTP) on the same host.
+        port = 80
+        print(
+            f"[!] {host}: scheme is https but exploit uses raw TCP — "
+            f"targeting port 80 (plain HTTP). Supply http:// or HOST:PORT "
+            f"to override.",
+            flush=True,
+        )
+    else:
+        port = 80
     return host, port
 
 
