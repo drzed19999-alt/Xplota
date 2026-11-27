@@ -160,11 +160,35 @@ def _run_exploit(
 def _result_dict(run: RunResult, scanner_timeout: float) -> dict[str, Any]:
     """Convert a RunResult into the standard Xplota result JSON object."""
     code = run.exit_code
+    stdout = run.stdout
+
+    # If the exploit crashed (Python traceback / RuntimeError), exit code 1
+    # is indistinguishable from intentional exit-1 "no overlong cookie".
+    # Detect crash markers and reclassify as INCONCLUSIVE.
+    _crash_markers = (
+        "Traceback (most recent call last)",
+        "RuntimeError:",
+        "TimeoutError:",
+        "ConnectionRefusedError:",
+        "ConnectionResetError:",
+        "worker discovery did not find",
+    )
+    _is_crash = code == 1 and any(m in stdout for m in _crash_markers)
 
     if run.error and code not in (0, 1, 2, 3, 4, 5, 6):
         vulnerable: bool | None = None
         verdict = "ERROR"
         reason = run.error
+    elif _is_crash:
+        vulnerable = None
+        verdict = "INCONCLUSIVE"
+        # Extract the most useful error line from the traceback.
+        reason = "Exploit crashed before disclosure completed"
+        for ln in stdout.splitlines():
+            if any(m in ln for m in ("RuntimeError", "TimeoutError",
+                                      "ConnectionRefusedError", "worker discovery")):
+                reason = ln.strip()
+                break
     elif code in _VULN_EXIT:
         vulnerable = True
         verdict = "VULNERABLE"
